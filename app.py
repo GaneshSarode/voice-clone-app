@@ -4,12 +4,13 @@ import tempfile
 import soundfile as sf
 import os
 import google.generativeai as genai
+# -------------------- GEMINI CONFIG --------------------
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
-
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
+API_KEY = os.getenv("GEMINI_API_KEY")
+if not API_KEY:
+    raise RuntimeError("GEMINI_API_KEY environment variable is not set")
+genai.configure(api_key=API_KEY)
+model = genai.GenerativeModel("gemini-2.5-flash")
 st.title("Multilingual Voice Translator")
 
 audio_file = st.audio_input("Record your voice")
