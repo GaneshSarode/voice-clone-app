@@ -1,32 +1,49 @@
 import streamlit as st
-from pipeline import process_audio
+import openai
+import tempfile
+import soundfile as sf
 
-st.set_page_config(page_title="Voice Clone Translator", layout="centered")
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-st.title("Voice Clone + Translate")
+st.title("Multilingual Voice Translator")
 
-uploaded_audio = st.file_uploader(
-    "Upload your voice (wav/mp3)",
-    type=["wav", "mp3"]
-)
-
-source_lang = st.selectbox(
-    "Source Language",
-    ["auto", "en", "hi", "fr", "de"]
-)
+audio_file = st.audio_input("Record your voice")
 
 target_lang = st.selectbox(
-    "Target Language",
-    ["en", "hi", "fr", "de"]
+    "Translate to",
+    ["English", "Hindi", "Marathi"]
 )
 
-if uploaded_audio and st.button("Process"):
-    with st.spinner("Processing..."):
-        output_audio = process_audio(
-            uploaded_audio,
-            source_lang,
-            target_lang
+if audio_file and st.button("Translate & Speak"):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        f.write(audio_file.read())
+        audio_path = f.name
+
+    # 1️⃣ Speech → Text
+    with open(audio_path, "rb") as f:
+        transcript = openai.audio.transcriptions.create(
+            model="whisper-1",
+            file=f
         )
 
-    st.audio(output_audio, format="audio/wav")
-    st.success("Done")
+    text = transcript.text
+    st.text_area("Transcribed Text", text)
+
+    # 2️⃣ Translate
+    prompt = f"Translate this to {target_lang}: {text}"
+    translation = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    translated_text = translation.choices[0].message.content
+    st.text_area("Translated Text", translated_text)
+
+    # 3️⃣ Text → Speech
+    speech = openai.audio.speech.create(
+        model="gpt-4o-mini-tts",
+        voice="alloy",
+        input=translated_text
+    )
+
+    audio_bytes = speech.read()
+    st.audio(audio_bytes, format="audio/wav")
