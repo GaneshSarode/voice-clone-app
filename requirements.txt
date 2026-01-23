@@ -1,0 +1,5 @@
+streamlit
+torch
+faster-whisper
+transformers
+soundfile
