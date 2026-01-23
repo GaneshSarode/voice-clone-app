@@ -1,5 +1,5 @@
 import streamlit as st
-import openai
+
 import tempfile
 import soundfile as sf
 import os
@@ -10,7 +10,8 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable is not set")
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
+
 st.title("Multilingual Voice Translator")
 
 audio_file = st.audio_input("Record your voice")
