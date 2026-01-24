@@ -1,5 +1,5 @@
 streamlit
-transformers
 torch
+transformers
 sentencepiece
-pyttsx3
+soundfile
