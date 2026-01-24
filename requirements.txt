@@ -1,5 +1,2 @@
 streamlit
-openai
-soundfile
-numpy
 google-generativeai
