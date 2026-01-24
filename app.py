@@ -1,88 +1,81 @@
 import streamlit as st
-import os
-import tempfile
-from gtts import gTTS
-import google.generativeai as genai
+import pyttsx3
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-# ---------------- CONFIG ----------------
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
-    page_title="Voice Translator",
+    page_title="Offline Multilingual Voice Translator",
     page_icon="🌍",
     layout="centered"
 )
 
-API_KEY = os.getenv("GEMINI_API_KEY")
-if not API_KEY:
-    st.error("GEMINI_API_KEY is not set")
-    st.stop()
+st.title("🌍 Offline Multilingual Voice Translator")
+st.caption("Local model • No API • No Internet after download")
 
-genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel("gemini-1.0-pro")
+# ---------------- LANGUAGE MAP (NLLB CODES) ----------------
+LANG_MAP = {
+    "English": "eng_Latn",
+    "Hindi": "hin_Deva",
+    "Marathi": "mar_Deva",
+    "French": "fra_Latn",
+    "Spanish": "spa_Latn",
+    "German": "deu_Latn",
+    "Tamil": "tam_Taml",
+    "Bengali": "ben_Beng"
+}
+
+MODEL_NAME = "facebook/nllb-200-distilled-600M"
+
+# ---------------- LOAD MODEL (ONCE) ----------------
+@st.cache_resource
+def load_model():
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+    return tokenizer, model
+
+tokenizer, model = load_model()
 
 # ---------------- UI ----------------
-st.markdown(
-    """
-    <h1 style="text-align:center;">🌍 Voice Translator</h1>
-    <p style="text-align:center;color:gray;">
-        Speak → Translate → Listen (Stable Version)
-    </p>
-    """,
-    unsafe_allow_html=True
-)
-
-st.divider()
-
-# Input text (voice-to-text can be added later)
 input_text = st.text_area(
-    "🗣️ Enter text in English",
-    placeholder="Example: Hello, how are you?",
+    "🗣️ Enter text (English)",
+    placeholder="Hello, how are you?",
     height=120
 )
 
 target_lang = st.selectbox(
     "🌐 Translate to",
-    ["Hindi", "Marathi", "French"]
+    list(LANG_MAP.keys())
 )
 
-translate_btn = st.button("🚀 Translate & Speak", use_container_width=True)
+if st.button("🚀 Translate & Speak", use_container_width=True):
 
-st.divider()
-
-# ---------------- LOGIC ----------------
-if translate_btn:
     if not input_text.strip():
         st.warning("Please enter some text.")
-    else:
-        with st.spinner("Translating..."):
-            try:
-                prompt = f"Translate the following English text to {target_lang}:\n\n{input_text}"
-                response = model.generate_content(prompt)
+        st.stop()
 
-                translated_text = response.text.strip()
+    with st.spinner("Translating (first time may take a while)..."):
+        src_lang = "eng_Latn"
+        tgt_lang = LANG_MAP[target_lang]
 
-                st.success("✅ Translation Successful")
-                st.text_area(
-                    "📘 Translated Text",
-                    value=translated_text,
-                    height=120
-                )
+        tokenizer.src_lang = src_lang
+        encoded = tokenizer(input_text, return_tensors="pt")
+        generated = model.generate(
+            **encoded,
+            forced_bos_token_id=tokenizer.lang_code_to_id[tgt_lang]
+        )
+        translated_text = tokenizer.decode(
+            generated[0],
+            skip_special_tokens=True
+        )
 
-                # -------- TEXT TO SPEECH --------
-                lang_map = {
-                    "Hindi": "hi",
-                    "Marathi": "mr",
-                    "French": "fr"
-                }
+    st.success("✅ Translation Successful")
+    st.text_area(
+        "📘 Translated Text",
+        value=translated_text,
+        height=120
+    )
 
-                tts = gTTS(
-                    text=translated_text,
-                    lang=lang_map[target_lang]
-                )
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as audio_file:
-                    tts.save(audio_file.name)
-                    st.audio(audio_file.name, format="audio/mp3")
-
-            except Exception as e:
-                st.error("❌ Something went wrong")
-                st.code(str(e))
+    # ---------------- OFFLINE TEXT TO SPEECH ----------------
+    engine = pyttsx3.init()
+    engine.say(translated_text)
+    engine.runAndWait()
