@@ -1,3 +1,5 @@
 streamlit
-google-generativeai
-gtts
+transformers
+torch
+sentencepiece
+pyttsx3
