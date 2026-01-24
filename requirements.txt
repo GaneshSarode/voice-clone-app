@@ -1,5 +1,7 @@
 streamlit
-torch
-transformers
+torch==2.1.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+transformers==4.36.2
 sentencepiece
 soundfile
+numpy
