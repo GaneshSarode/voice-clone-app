@@ -1,54 +1,91 @@
 import streamlit as st
 import torch
-import tempfile
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+import librosa
 import soundfile as sf
+import os
 
+from transformers import (
+    WhisperProcessor,
+    WhisperForConditionalGeneration,
+    MarianMTModel,
+    MarianTokenizer,
+    pipeline
+)
+
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
-    page_title="Offline Multilingual Translator",
-    page_icon="🌍",
+    page_title="Voice Translator",
+    page_icon="🎙️",
     layout="centered"
 )
 
-st.title("🌍 Offline Multilingual Translator")
-st.caption("No API • Local model • Streamlit-safe")
+st.title("🎙️ English → Hindi Voice Translator")
+st.caption("CPU-based | Hugging Face Models | Offline Cache")
 
-MODEL_NAME = "facebook/nllb-200-distilled-600M"
+# ---------------- MODEL LOADING ----------------
+@st.cache_resource(show_spinner=False)
+def load_models():
+    processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+    asr = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
 
-LANG_MAP = {
-    "English": "eng_Latn",
-    "Hindi": "hin_Deva",
-    "Marathi": "mar_Deva",
-    "French": "fra_Latn",
-    "Spanish": "spa_Latn",
-}
+    tr_tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-hi")
+    tr_model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-en-hi")
 
-@st.cache_resource
-def load_model():
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-    return tokenizer, model
+    tts = pipeline(
+        "text-to-speech",
+        model="facebook/mms-tts-hin",
+        device=-1
+    )
+    return processor, asr, tr_tokenizer, tr_model, tts
 
-tokenizer, model = load_model()
 
-text = st.text_area("Enter text (English)", height=120)
-target = st.selectbox("Translate to", LANG_MAP.keys())
+with st.spinner("Loading models (first time only)..."):
+    processor, asr_model, tr_tokenizer, tr_model, tts = load_models()
 
-if st.button("Translate"):
-    if not text.strip():
-        st.warning("Enter text")
-        st.stop()
+st.success("Models loaded from cache ✔️")
 
-    tokenizer.src_lang = "eng_Latn"
-    inputs = tokenizer(text, return_tensors="pt")
+# ---------------- FILE UPLOAD ----------------
+audio_file = st.file_uploader(
+    "Upload English audio (.wav)",
+    type=["wav"]
+)
 
-    with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            forced_bos_token_id=tokenizer.lang_code_to_id[LANG_MAP[target]]
-        )
+if audio_file:
+    st.audio(audio_file)
 
-    translated = tokenizer.decode(output[0], skip_special_tokens=True)
+    if st.button("Translate", use_container_width=True):
+        with st.spinner("Processing... please wait"):
 
-    st.success("Translation done")
-    st.text_area("Translated Text", translated, height=120)
+            # Load audio
+            audio, _ = librosa.load(audio_file, sr=16000)
+
+            # ASR
+            inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
+            with torch.no_grad():
+                ids = asr_model.generate(inputs.input_features)
+
+            english_text = processor.decode(ids[0], skip_special_tokens=True)
+
+            st.subheader("Recognized English")
+            st.write(english_text)
+
+            # Translation
+            tokens = tr_tokenizer(english_text, return_tensors="pt", padding=True)
+            translated = tr_model.generate(**tokens)
+            hindi_text = tr_tokenizer.decode(translated[0], skip_special_tokens=True)
+
+            st.subheader("Translated Hindi")
+            st.write(hindi_text)
+
+            # TTS
+            speech = tts(hindi_text)
+            output_path = "output.wav"
+            sf.write(output_path, speech["audio"], speech["sampling_rate"])
+
+            st.subheader("Hindi Voice Output")
+            st.audio(output_path)
+            st.download_button(
+                "Download Audio",
+                data=open(output_path, "rb"),
+                file_name="translated_hindi.wav"
+            )
