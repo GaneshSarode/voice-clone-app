@@ -1,0 +1,11 @@
+streamlit
+torch==2.1.2
+torchaudio==2.1.2
+torchvision==0.16.2
+transformers==4.36.2
+sentencepiece
+librosa
+soundfile
+numpy
+scipy
+TTS==0.22.0
