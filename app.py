@@ -1,7 +1,7 @@
 import streamlit as st
 import librosa
 import tempfile
-from transformers import pipeline
+
 from TTS.api import TTS
 
 from ui import render_header, render_sidebar ,render_status
