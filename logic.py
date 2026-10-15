@@ -1,13 +1,19 @@
 import librosa
 import tempfile
 
-def get_english_text(asr, uploaded, typed_text):
-    if uploaded:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(uploaded.read())
-            path = tmp.name
-        audio, _ = librosa.load(path, sr=16000)
-        text = asr(audio)["text"]
-        return text, path
-    else:
-        return typed_text, "/mnt/c/Users/Ganesh_Ashok_Sarode/Downloads/test.wav"
+
+def transcribe_audio(asr, uploaded_file):
+    """Save uploaded audio to a temp file, load at 16 kHz, and transcribe."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(uploaded_file.read())
+        speaker_path = tmp.name
+
+    audio, _ = librosa.load(speaker_path, sr=16000)
+    text = asr(audio)["text"]
+    return text, speaker_path
+
+
+def translate_text(translator, text):
+    """Translate text using the given HuggingFace translator pipeline."""
+    result = translator(text)
+    return result[0]["translation_text"]
