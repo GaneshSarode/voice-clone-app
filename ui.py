@@ -330,7 +330,10 @@ def render_sidebar(capabilities=None):
             st.caption("Loads ~4 GB of weights and runs ~4x slower than realtime on CPU. "
                        "With this off, voice profiles speak with a built-in voice.")
         else:
-            st.caption("Cloning engine not detected — voice profiles will use a built-in voice.")
+            st.caption(
+                "Cloning engine disabled on cloud (Streamlit Cloud has a 1 GB RAM limit; XTTS v2 requires ~4 GB). "
+                "Run locally via `streamlit run app.py` for full XTTS cloning."
+            )
 
         local_only = st.checkbox(
             "Local only (no cloud fallbacks)",

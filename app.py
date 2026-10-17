@@ -115,10 +115,12 @@ def audio_mime(path):
 
 def resolve_plan(voice_info):
     """How this voice will be produced right now, with an honest reason."""
+    cloning_cap = CAPABILITY_MAP.get("cloning")
     return plan_synthesis(
         voice_info,
         cloning_enabled=sidebar_settings["enable_cloning"],
         cloning_loaded=CLONING_LOADED,
+        cloning_available=bool(cloning_cap and cloning_cap.available),
     )
 
 
@@ -564,7 +566,16 @@ with tabs[2]:
     </div>
     """, unsafe_allow_html=True)
 
-    if not sidebar_settings["enable_cloning"]:
+    cloning_cap = CAPABILITY_MAP.get("cloning")
+    cloning_available = bool(cloning_cap and cloning_cap.available)
+
+    if not cloning_available:
+        st.info(
+            "💡 **Running on Streamlit Cloud:** Streamlit Cloud's free sandbox has a 1 GB RAM limit, whereas deep neural voice cloning (XTTS v2) requires ~4 GB RAM. "
+            "To clone your voice with true XTTS v2, run the app on your computer (`streamlit run app.py`). "
+            "On this cloud server, profiles speak using natural studio voices."
+        )
+    elif not sidebar_settings["enable_cloning"]:
         st.warning(
             "⚠️ The XTTS v2 cloning engine is off, so voice profiles will speak with a built-in "
             "neural voice instead of your reference. Turn it on in the sidebar to clone."

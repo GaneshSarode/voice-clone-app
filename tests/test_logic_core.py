@@ -114,6 +114,18 @@ class LogicCoreTests(unittest.TestCase):
         self.assertIn("unavailable", plan.label)
         self.assertIn("could not be loaded", plan.reason)
 
+    def test_plan_clone_engine_cloud_ram_limit_is_explicit(self):
+        reference = self._write_reference()
+        plan = logic.plan_synthesis(
+            {"is_cloned": True, "audio_path": reference},
+            cloning_enabled=False,
+            cloning_loaded=False,
+            cloning_available=False,
+        )
+        self.assertEqual(plan.engine, "neural")
+        self.assertIn("cloud", plan.label)
+        self.assertIn("RAM limit", plan.reason)
+
     def test_plan_true_clone_when_engine_ready(self):
         reference = self._write_reference()
         plan = logic.plan_synthesis(

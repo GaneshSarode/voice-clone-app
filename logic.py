@@ -196,7 +196,7 @@ def _detect_capabilities_uncached() -> list:
                 "cloning",
                 "Voice cloning (XTTS v2)",
                 False,
-                f"Coqui TTS not importable: {exc}",
+                f"XTTS v2 needs ~4 GB RAM and runs locally via 'streamlit run app.py' (cloud sandbox limited to 1 GB; {exc})",
             )
         )
 
@@ -577,7 +577,7 @@ class SynthesisPlan:
     is_true_clone: bool
 
 
-def plan_synthesis(voice_info, *, cloning_enabled, cloning_loaded) -> SynthesisPlan:
+def plan_synthesis(voice_info, *, cloning_enabled, cloning_loaded, cloning_available: bool = True) -> SynthesisPlan:
     """Resolve the synthesis engine for one voice without silent substitution."""
     is_cloned = bool((voice_info or {}).get("is_cloned"))
     reference_path = (voice_info or {}).get("audio_path")
@@ -605,13 +605,22 @@ def plan_synthesis(voice_info, *, cloning_enabled, cloning_loaded) -> SynthesisP
             "with a built-in voice instead of the reference.",
             is_true_clone=False,
         )
+    if not cloning_available:
+        return SynthesisPlan(
+            engine="neural",
+            label="Neural fallback - cloning unavailable on cloud",
+            reference_path="",
+            edge_voice=edge_voice,
+            reason="Streamlit Cloud has a 1 GB RAM limit, so local XTTS v2 is disabled here. Run locally on your PC via 'streamlit run app.py' to use true zero-shot voice cloning.",
+            is_true_clone=False,
+        )
     if not cloning_enabled:
         return SynthesisPlan(
             engine="neural",
             label="Neural fallback - cloning turned off",
             reference_path="",
             edge_voice=edge_voice,
-            reason="Cloning is turned off, so this profile speaks with a built-in voice, "
+            reason="Cloning is turned off in the sidebar, so this profile speaks with a built-in voice, "
             "not the reference sample.",
             is_true_clone=False,
         )
