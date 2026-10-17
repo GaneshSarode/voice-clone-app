@@ -1,18 +1,88 @@
-# logic.py - Voice Cloning, Neural Synthesis & Platform Engine
+# logic.py - VoxStudio platform engine: synthesis, voice profiles, ASR,
+# translation, audio post-processing and evaluation metrics.
 import os
 import json
+import uuid
 import asyncio
+import logging
 import tempfile
-import edge_tts
-import librosa
-import soundfile
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 
-CLONED_VOICES_DIR = Path("cloned_voices")
-CLONED_VOICES_DIR.mkdir(exist_ok=True)
-METADATA_FILE = CLONED_VOICES_DIR / "voices_metadata.json"
+import numpy as np
+import librosa
+import soundfile
+import edge_tts
 
-# Curated ElevenLabs Style Voice Library
+logger = logging.getLogger("voxstudio")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+# ---------------------------------------------------------------------------
+# Directory layout (all generated data stays out of the source tree)
+# ---------------------------------------------------------------------------
+CLONED_VOICES_DIR = Path("cloned_voices")
+OUTPUT_DIR = Path("outputs")
+CLONED_VOICES_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+DEFAULT_USER = "default"
+
+
+def _safe_component(value: str, fallback: str = DEFAULT_USER) -> str:
+    """Strip a string down to a filesystem-safe path component."""
+    cleaned = "".join(c for c in str(value) if c.isalnum() or c in "-_")
+    return cleaned or fallback
+
+
+def safe_filename(name: str, fallback: str = "audio") -> str:
+    """Convert a display name into a safe download file name."""
+    cleaned = "".join(
+        c if (c.isalnum() or c in "-_ ") else "_" for c in str(name)
+    ).strip()
+    return cleaned.replace(" ", "_") or fallback
+
+
+def _user_dir(user_id: str = DEFAULT_USER) -> Path:
+    """Per-session storage directory so users never see each other's voices."""
+    directory = CLONED_VOICES_DIR / _safe_component(user_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _metadata_file(user_id: str = DEFAULT_USER) -> Path:
+    return _user_dir(user_id) / "voices_metadata.json"
+
+
+def new_output_path(prefix: str, extension: str) -> Path:
+    """Return a unique path inside the outputs directory."""
+    return OUTPUT_DIR / f"{_safe_component(prefix, 'audio')}_{uuid.uuid4().hex[:10]}.{extension.lstrip('.')}"
+
+
+def cleanup_outputs(max_age_minutes: int = 120) -> int:
+    """Delete generated audio older than ``max_age_minutes`` (bounded disk use)."""
+    cutoff = datetime.now() - timedelta(minutes=max_age_minutes)
+    removed = 0
+    for item in OUTPUT_DIR.glob("*"):
+        try:
+            if item.is_file() and datetime.fromtimestamp(item.stat().st_mtime) < cutoff:
+                item.unlink()
+                removed += 1
+        except OSError as exc:  # pragma: no cover - best effort housekeeping
+            logger.debug("Could not remove %s: %s", item, exc)
+    if removed:
+        logger.info("Cleaned up %d stale output file(s).", removed)
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Built-in voice library
+# ---------------------------------------------------------------------------
 PRESET_VOICES = {
     "Rachel (Calm Narrator - US)": {
         "voice_id": "rachel",
@@ -23,7 +93,7 @@ PRESET_VOICES = {
         "desc": "Calm, warm and natural voice perfect for storytelling, long-form content and tutorials.",
         "edge_voice": "en-US-JennyNeural",
         "lang_code": "en",
-        "avatar": "👩‍💼"
+        "avatar": "👩‍💼",
     },
     "Adam (Deep Narrator - US)": {
         "voice_id": "adam",
@@ -34,7 +104,7 @@ PRESET_VOICES = {
         "desc": "Deep, authoritative, and cinematic male voice suitable for voiceovers and trailers.",
         "edge_voice": "en-US-ChristopherNeural",
         "lang_code": "en",
-        "avatar": "🎙️"
+        "avatar": "🎙️",
     },
     "Antoni (Conversational - UK)": {
         "voice_id": "antoni",
@@ -45,7 +115,7 @@ PRESET_VOICES = {
         "desc": "Friendly, approachable British accent with natural inflection and warmth.",
         "edge_voice": "en-GB-RyanNeural",
         "lang_code": "en",
-        "avatar": "👨‍💼"
+        "avatar": "👨‍💼",
     },
     "Bella (Expressive - UK)": {
         "voice_id": "bella",
@@ -56,7 +126,7 @@ PRESET_VOICES = {
         "desc": "Bright, engaging female voice with crisp British diction and high clarity.",
         "edge_voice": "en-GB-SoniaNeural",
         "lang_code": "en",
-        "avatar": "✨"
+        "avatar": "✨",
     },
     "Arnav (Executive - Indian English)": {
         "voice_id": "arnav",
@@ -67,7 +137,7 @@ PRESET_VOICES = {
         "desc": "Clear, professional Indian English male voice ideal for corporate presentations.",
         "edge_voice": "en-IN-PrabhatNeural",
         "lang_code": "en",
-        "avatar": "👨‍💻"
+        "avatar": "👨‍💻",
     },
     "Neerja (Pleasant - Indian English)": {
         "voice_id": "neerja",
@@ -78,7 +148,7 @@ PRESET_VOICES = {
         "desc": "Pleasant, welcoming Indian English female voice with warm tone.",
         "edge_voice": "en-IN-NeerjaNeural",
         "lang_code": "en",
-        "avatar": "👩‍🎓"
+        "avatar": "👩‍🎓",
     },
     "Kavya (Expressive - Hindi)": {
         "voice_id": "kavya",
@@ -89,7 +159,7 @@ PRESET_VOICES = {
         "desc": "Expressive native Hindi female speaker with authentic inflection.",
         "edge_voice": "hi-IN-SwaraNeural",
         "lang_code": "hi",
-        "avatar": "🌸"
+        "avatar": "🌸",
     },
     "Madhur (Authoritative - Hindi)": {
         "voice_id": "madhur",
@@ -100,7 +170,7 @@ PRESET_VOICES = {
         "desc": "Deep, confident native Hindi male voice for news, documentaries and ads.",
         "edge_voice": "hi-IN-MadhurNeural",
         "lang_code": "hi",
-        "avatar": "📻"
+        "avatar": "📻",
     },
     "Denise (Chic - French)": {
         "voice_id": "denise",
@@ -111,7 +181,7 @@ PRESET_VOICES = {
         "desc": "Sophisticated native Parisian French voice with subtle articulation.",
         "edge_voice": "fr-FR-DeniseNeural",
         "lang_code": "fr",
-        "avatar": "🥐"
+        "avatar": "🥐",
     },
     "Henri (Cultured - French)": {
         "voice_id": "henri",
@@ -122,7 +192,7 @@ PRESET_VOICES = {
         "desc": "Cultured and balanced French male voice for podcasts and voiceovers.",
         "edge_voice": "fr-FR-HenriNeural",
         "lang_code": "fr",
-        "avatar": "🎨"
+        "avatar": "🎨",
     },
     "Nanami (Gentle - Japanese)": {
         "voice_id": "nanami",
@@ -133,7 +203,7 @@ PRESET_VOICES = {
         "desc": "Gentle, polished Japanese voice suitable for virtual agents and audiobooks.",
         "edge_voice": "ja-JP-NanamiNeural",
         "lang_code": "ja",
-        "avatar": "🎐"
+        "avatar": "🎐",
     },
     "Keita (Natural - Japanese)": {
         "voice_id": "keita",
@@ -144,64 +214,98 @@ PRESET_VOICES = {
         "desc": "Natural, clear modern Japanese male voice for games and narration.",
         "edge_voice": "ja-JP-KeitaNeural",
         "lang_code": "ja",
-        "avatar": "🎮"
-    }
+        "avatar": "🎮",
+    },
 }
 
 
-def load_cloned_voices_metadata():
-    """Load metadata of user-cloned custom voices."""
-    if not METADATA_FILE.exists():
+# ---------------------------------------------------------------------------
+# Voice profile storage (per session)
+# ---------------------------------------------------------------------------
+def load_cloned_voices_metadata(user_id: str = DEFAULT_USER) -> dict:
+    """Load the voice profiles registered by one session."""
+    metadata_file = _metadata_file(user_id)
+    if not metadata_file.exists():
         return {}
     try:
-        with open(METADATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+        with open(metadata_file, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read voice metadata %s: %s", metadata_file, exc)
         return {}
 
 
-def save_cloned_voice_file(name, audio_bytes, description="", role="Custom Voice", gender="Unknown", accent="Custom"):
-    """Save an uploaded voice recording and register it in the voice library."""
-    voice_id = f"custom_{name.lower().replace(' ', '_')}_{int(len(audio_bytes))}"
-    file_path = CLONED_VOICES_DIR / f"{voice_id}.wav"
+def _write_metadata(metadata: dict, user_id: str = DEFAULT_USER) -> None:
+    with open(_metadata_file(user_id), "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2)
 
-    with open(file_path, "wb") as f:
-        f.write(audio_bytes)
 
-    metadata = load_cloned_voices_metadata()
+def save_cloned_voice_file(
+    name,
+    audio_bytes,
+    description="",
+    role="Custom Voice",
+    gender="Unknown",
+    accent="Custom",
+    user_id: str = DEFAULT_USER,
+):
+    """Store a reference recording as a reusable voice profile.
+
+    Note: this registers a *profile* (the reference sample used by the XTTS v2
+    engine for true zero-shot cloning when that engine is available). It does not
+    itself train or extract a speaker embedding.
+    """
+    voice_id = f"voice_{uuid.uuid4().hex[:12]}"
+    file_path = _user_dir(user_id) / f"{voice_id}.wav"
+
+    with open(file_path, "wb") as handle:
+        handle.write(audio_bytes)
+
+    metadata = load_cloned_voices_metadata(user_id)
     metadata[voice_id] = {
         "voice_id": voice_id,
         "name": name,
         "gender": gender,
         "accent": accent,
         "role": role,
-        "desc": description or f"Custom cloned voice generated from uploaded audio sample.",
+        "desc": description or "Voice profile created from an uploaded reference sample.",
         "audio_path": str(file_path),
         "is_cloned": True,
-        "avatar": "🧬"
+        "avatar": "🧬",
     }
-
-    with open(METADATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
-
+    _write_metadata(metadata, user_id)
+    logger.info("Saved voice profile '%s' (%s) for session %s.", name, voice_id, user_id)
     return metadata[voice_id]
 
 
-def delete_cloned_voice(voice_id):
-    """Delete a cloned voice from disk and metadata."""
-    metadata = load_cloned_voices_metadata()
-    if voice_id in metadata:
-        audio_path = Path(metadata[voice_id].get("audio_path", ""))
-        if audio_path.exists():
-            try:
-                audio_path.unlink()
-            except Exception:
-                pass
-        del metadata[voice_id]
-        with open(METADATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2)
-        return True
-    return False
+def delete_cloned_voice(voice_id: str, user_id: str = DEFAULT_USER) -> bool:
+    """Delete a voice profile and its reference audio (session-scoped)."""
+    metadata = load_cloned_voices_metadata(user_id)
+    record = metadata.get(voice_id)
+    if not record:
+        return False
+
+    audio_path = Path(record.get("audio_path", ""))
+    # Only ever delete files we created inside this session's directory.
+    if audio_path.exists() and _user_dir(user_id) in audio_path.resolve().parents:
+        try:
+            audio_path.unlink()
+        except OSError as exc:
+            logger.warning("Could not delete %s: %s", audio_path, exc)
+
+    del metadata[voice_id]
+    _write_metadata(metadata, user_id)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Synthesis
+# ---------------------------------------------------------------------------
+def rate_string_from_speed(speed_factor: float) -> str:
+    """Convert a speed multiplier into an edge-tts rate string."""
+    rate_percent = int(round((float(speed_factor) - 1.0) * 100))
+    rate_percent = max(-90, min(200, rate_percent))
+    return f"{'+' if rate_percent >= 0 else ''}{rate_percent}%"
 
 
 async def _generate_edge_tts(text, voice_name, rate_str, output_path):
@@ -209,39 +313,92 @@ async def _generate_edge_tts(text, voice_name, rate_str, output_path):
     await communicate.save(output_path)
 
 
-def synthesize_neural_speech(text, edge_voice, speed_factor=1.0, output_path="output.mp3"):
-    """Generate high-quality ElevenLabs-grade speech using Neural TTS."""
-    rate_percent = int((speed_factor - 1.0) * 100)
-    rate_str = f"{'+' if rate_percent >= 0 else ''}{rate_percent}%"
+def synthesize_neural_speech(text, edge_voice, speed_factor=1.0, output_path=None):
+    """Generate speech with the neural TTS engine (edge-tts)."""
+    if not text or not text.strip():
+        raise ValueError("Cannot synthesize empty text.")
 
-    asyncio.run(_generate_edge_tts(text, edge_voice, rate_str, output_path))
+    if output_path is None:
+        output_path = str(new_output_path("tts", "mp3"))
+    output_path = str(output_path)
+
+    rate_str = rate_string_from_speed(speed_factor)
+    try:
+        asyncio.run(_generate_edge_tts(text, edge_voice, rate_str, output_path))
+    except RuntimeError as exc:
+        # Defensive: fall back to a private loop if one is already running.
+        logger.debug("asyncio.run failed (%s); using a dedicated event loop.", exc)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_generate_edge_tts(text, edge_voice, rate_str, output_path))
+        finally:
+            loop.close()
+
+    logger.info("Synthesized %s (%s)", output_path, edge_voice)
     return output_path
 
 
-def synthesize_xtts_clone(xtts_model, text, speaker_wav_path, language="en", output_path="cloned_output.wav"):
-    """Generate cloned speech using Coqui XTTS v2 with user's voice reference."""
+def synthesize_xtts_clone(xtts_model, text, speaker_wav_path, language="en", output_path=None):
+    """Generate cloned speech with Coqui XTTS v2 from a reference sample."""
+    if output_path is None:
+        output_path = str(new_output_path("clone", "wav"))
     xtts_model.tts_to_file(
         text=text,
         speaker_wav=speaker_wav_path,
         language=language,
-        file_path=output_path,
-        split_sentences=True
+        file_path=str(output_path),
+        split_sentences=True,
     )
-    return output_path
+    return str(output_path)
 
 
+def postprocess_audio(input_path, pitch_semitones=0.0, gain_db=0.0, output_path=None):
+    """Apply a pitch shift and/or volume gain to an audio file.
+
+    Returns a WAV path, or the original path when there is nothing to change.
+    Falls back to the original file if processing is unavailable.
+    """
+    pitch_semitones = float(pitch_semitones or 0.0)
+    gain_db = float(gain_db or 0.0)
+
+    if abs(pitch_semitones) < 1e-6 and abs(gain_db) < 1e-6:
+        return str(input_path)
+
+    try:
+        samples, sample_rate = librosa.load(str(input_path), sr=None, mono=True)
+        if abs(pitch_semitones) >= 1e-6:
+            samples = librosa.effects.pitch_shift(samples, sr=sample_rate, n_steps=pitch_semitones)
+        if abs(gain_db) >= 1e-6:
+            samples = samples * (10.0 ** (gain_db / 20.0))
+
+        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+        if peak > 1.0:  # avoid clipping
+            samples = samples / peak
+
+        if output_path is None:
+            output_path = str(new_output_path("processed", "wav"))
+        soundfile.write(str(output_path), samples, int(sample_rate))
+        return str(output_path)
+    except Exception as exc:  # librosa/soundfile can fail on odd inputs
+        logger.warning("Post-processing failed (%s); returning original audio.", exc)
+        return str(input_path)
+
+
+# ---------------------------------------------------------------------------
+# Speech recognition
+# ---------------------------------------------------------------------------
 def transcribe_audio_file(asr_pipeline, audio_file):
-    """Transcribe uploaded audio file to English/multilingual text using Whisper ASR or Google Web Speech."""
+    """Transcribe an uploaded audio file via a local ASR model or Google Web Speech."""
     audio_bytes = audio_file.read()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_bytes)
         temp_path = tmp.name
 
-    # 1. Try local Whisper pipeline (faster-whisper or HuggingFace)
+    # 1. Local ASR pipeline (faster-whisper WhisperModel or a HF pipeline).
     if asr_pipeline is not None:
         try:
             if hasattr(asr_pipeline, "transcribe"):
-                segments, info = asr_pipeline.transcribe(temp_path, beam_size=1)
+                segments, _info = asr_pipeline.transcribe(temp_path, beam_size=1)
                 text = " ".join(segment.text for segment in segments).strip()
                 if text:
                     return text, temp_path, None
@@ -251,13 +408,15 @@ def transcribe_audio_file(asr_pipeline, audio_file):
                 text = result.get("text", "").strip()
                 if text:
                     return text, temp_path, None
-        except Exception as e:
-            print(f"Whisper ASR error: {e}")
+        except Exception as exc:
+            logger.warning("Local ASR failed, falling back to cloud STT: %s", exc)
 
-    # 2. Cloud-native SpeechRecognition (Google Web Speech API)
+    # 2. Cloud STT (Google Web Speech via SpeechRecognition).
+    #    NOTE: audio is uploaded to Google's service for transcription.
     try:
         import speech_recognition as sr
-        data, sr_rate = librosa.load(temp_path, sr=16000, mono=True)
+
+        data, _ = librosa.load(temp_path, sr=16000, mono=True)
         converted_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
         soundfile.write(converted_wav, data, 16000)
 
@@ -270,96 +429,200 @@ def transcribe_audio_file(asr_pipeline, audio_file):
 
         try:
             os.remove(converted_wav)
-        except Exception:
+        except OSError:
             pass
 
-        # Try common accents: Indian English, US English, and Hindi
-        for lang_code in ["en-IN", "en-US", "hi-IN"]:
+        for lang_code in ("en-IN", "en-US", "hi-IN"):
             try:
                 text = recognizer.recognize_google(audio_data, language=lang_code)
                 if text and text.strip():
                     return text.strip(), temp_path, None
-            except Exception:
+            except sr.UnknownValueError:
                 continue
-
+            except sr.RequestError as exc:
+                return None, temp_path, f"Speech service error: {exc}"
     except ImportError:
-        return None, temp_path, "SpeechRecognition library is not installed on this cloud instance."
-    except Exception as e:
-        return None, temp_path, f"Speech recognition service error: {str(e)}"
+        return None, temp_path, "SpeechRecognition is not installed on this instance."
+    except Exception as exc:
+        return None, temp_path, f"Speech recognition error: {exc}"
 
-    return None, temp_path, "Could not detect clear words in the audio. The recording might be too quiet, noisy, or in an unsupported format."
+    return (
+        None,
+        temp_path,
+        "Could not detect clear words. The recording may be too quiet, noisy, or unsupported.",
+    )
 
 
+# ---------------------------------------------------------------------------
+# Translation
+# ---------------------------------------------------------------------------
 def translate_text(translator_pipeline, text, target_lang_code="hi"):
-    """Translate text to target language using HuggingFace or fast cloud API fallback."""
+    """Translate text with a HuggingFace pipeline, falling back to MyMemory.
+
+    NOTE: the MyMemory fallback sends the text to a public web service.
+    """
     if translator_pipeline is not None:
         try:
-            res = translator_pipeline(text)
-            return res[0]["translation_text"]
-        except Exception:
-            pass
+            result = translator_pipeline(text)
+            return result[0]["translation_text"]
+        except Exception as exc:
+            logger.warning("HF translation failed, using fallback: %s", exc)
 
-    # Cloud lightweight fallback (uses zero RAM, works everywhere)
     try:
-        import urllib.request
-        import urllib.parse
-        import json
-        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair=en|{target_lang_code}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            translated = data.get("responseData", {}).get("translatedText")
+        url = (
+            "https://api.mymemory.translated.net/get?q="
+            f"{urllib.parse.quote(text)}&langpair=en|{target_lang_code}"
+        )
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode())
+            translated = payload.get("responseData", {}).get("translatedText")
             if translated:
                 return translated
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Fallback translation failed: %s", exc)
 
     return text
 
 
-# Voice Agent Personalities
+# ---------------------------------------------------------------------------
+# Evaluation metrics (real, measurable numbers)
+# ---------------------------------------------------------------------------
+def compute_audio_metrics(audio_path):
+    """Return basic acoustic statistics for an audio file."""
+    try:
+        samples, sample_rate = librosa.load(str(audio_path), sr=None, mono=True)
+        return {
+            "duration_s": round(float(librosa.get_duration(y=samples, sr=sample_rate)), 2),
+            "sample_rate": int(sample_rate),
+            "rms": round(float(np.sqrt(np.mean(samples ** 2))) if samples.size else 0.0, 4),
+            "peak": round(float(np.max(np.abs(samples))) if samples.size else 0.0, 4),
+        }
+    except Exception as exc:
+        logger.warning("Could not compute metrics for %s: %s", audio_path, exc)
+        return {"duration_s": None, "sample_rate": None, "rms": None, "peak": None}
+
+
+def generation_metrics(start_ts, end_ts, audio_path=None):
+    """Latency, audio duration and real-time factor for one generation."""
+    latency_ms = int((end_ts - start_ts) * 1000)
+    stats = compute_audio_metrics(audio_path) if audio_path else {}
+    duration = stats.get("duration_s")
+    rtf = round((latency_ms / 1000.0) / duration, 3) if duration else None
+    return {
+        "latency_ms": latency_ms,
+        "duration_s": duration,
+        "rtf": rtf,
+        "sample_rate": stats.get("sample_rate"),
+    }
+
+
+def _logmel_profile(samples, sample_rate=16000, n_mels=40):
+    """Mean log-mel spectral envelope, z-scored (content-robust speaker profile)."""
+    mel = librosa.feature.melspectrogram(y=samples, sr=sample_rate, n_mels=n_mels)
+    logmel = librosa.power_to_db(mel, ref=np.max).mean(axis=1)
+    return (logmel - logmel.mean()) / (logmel.std() + 1e-9)
+
+
+def speaker_similarity(reference_path, candidate_path):
+    """Spectral similarity in [0, 1] between two clips.
+
+    Correlation between the mean log-mel spectral envelopes of the reference and
+    the generated audio. This is a lightweight, content-robust speaker proxy
+    (identical voice/content scores ~1.0; different voices drop lower) rather than
+    a trained speaker-verification model.
+    """
+    try:
+        reference, _ = librosa.load(str(reference_path), sr=16000, mono=True)
+        candidate, _ = librosa.load(str(candidate_path), sr=16000, mono=True)
+        if reference.size < 1600 or candidate.size < 1600:
+            return None
+
+        profile_ref = _logmel_profile(reference)
+        profile_cand = _logmel_profile(candidate)
+        denom = float(np.linalg.norm(profile_ref) * np.linalg.norm(profile_cand))
+        if denom == 0:
+            return None
+        cosine = float(np.dot(profile_ref, profile_cand) / denom)
+        return round(max(0.0, min(1.0, cosine)), 3)
+    except Exception as exc:
+        logger.warning("Similarity computation failed: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Rule-based voice assistant
+# ---------------------------------------------------------------------------
 AGENT_PERSONAS = {
     "Alex (Tech Support Specialist)": {
         "voice": "en-US-ChristopherNeural",
         "intro": "Hello! I am Alex, your Technical Support Engineer. How can I assist you with your systems today?",
-        "prompt": "You are a friendly, highly competent Senior Technical Support Engineer who troubleshoots software, cloud, and AI systems with clear, concise guidance."
+        "prompt": "friendly, highly competent Senior Technical Support Engineer",
     },
     "Sarah (Executive Career Coach)": {
         "voice": "en-US-JennyNeural",
         "intro": "Welcome! I'm Sarah, your Executive Career Coach. Let's discuss your career goals, interview preparation, or leadership strategies.",
-        "prompt": "You are an empathetic, insightful Executive Career and Leadership Coach providing high-impact professional advice."
+        "prompt": "empathetic, insightful Executive Career and Leadership Coach",
     },
     "Maya (Language & Culture Tutor)": {
         "voice": "en-GB-SoniaNeural",
         "intro": "Hello there! I'm Maya, your language and cultural tutor. Which language or dialect would you like to explore today?",
-        "prompt": "You are a warm, multilingual educator helping students master pronunciation, idioms, and natural conversation."
+        "prompt": "warm, multilingual language and culture educator",
     },
     "Leo (Creative Storyteller & Roleplay)": {
         "voice": "en-GB-RyanNeural",
         "intro": "Greetings adventurer! I am Leo, your master storyteller. Give me a premise or world, and let's craft an epic tale together.",
-        "prompt": "You are an imaginative fantasy storyteller who speaks with rich descriptive prose and immersive roleplay."
-    }
+        "prompt": "imaginative fantasy storyteller with rich, descriptive prose",
+    },
 }
 
 
 def generate_agent_response(persona_name, user_input, conversation_history=None):
-    """Generate an intelligent conversational response for the Voice Agent."""
-    persona = AGENT_PERSONAS.get(persona_name, AGENT_PERSONAS["Alex (Tech Support Specialist)"])
-    
-    # Smart conversational generation logic
-    user_lower = user_input.lower()
-    
-    if any(greet in user_lower for greet in ["hello", "hi", "hey", "greetings"]):
-        response = f"{persona['intro']} What is on your mind?"
-    elif "who are you" in user_lower or "what can you do" in user_lower:
-        response = f"I am {persona_name.split(' ')[0]}, an AI Voice Agent powered by ElevenVoice. I can engage in live natural voice dialogues, answer technical or creative questions, and explain complex concepts."
-    elif "interview" in user_lower:
-        response = "The key to acing any interview is the STAR method: Situation, Task, Action, and Result. Make sure your narrative highlights your direct contribution and quantifiable impact."
-    elif "voice clone" in user_lower or "elevenlabs" in user_lower:
-        response = "ElevenLabs pioneered instant voice cloning by extracting speaker embeddings from a brief audio reference, allowing seamless text synthesis while preserving unique vocal timbre."
-    elif "python" in user_lower or "code" in user_lower or "bug" in user_lower:
-        response = "When debugging in Python, always isolate variables, inspect stack traces carefully, and leverage type annotations and unit tests to prevent silent regressions."
-    else:
-        response = f"That is a great inquiry. Regarding '{user_input.strip()}', the most effective approach is to examine the core parameters, test iteratively with small benchmarks, and scale based on verified metrics. Would you like me to elaborate on the details?"
+    """Return a scripted reply for the rule-based voice assistant.
 
-    return response, persona["voice"]
+    This is intentionally a transparent keyword-matching responder, not an LLM.
+    """
+    persona_name = persona_name if persona_name in AGENT_PERSONAS else next(iter(AGENT_PERSONAS))
+    persona = AGENT_PERSONAS[persona_name]
+    text = (user_input or "").strip().lower()
+    history = conversation_history or []
+
+    if any(greeting in text for greeting in ("hello", "hi ", "hi", "hey", "greetings")):
+        reply = f"{persona['intro']} What is on your mind?"
+    elif "who are you" in text or "what can you do" in text:
+        reply = (
+            f"I'm {persona_name.split(' ')[0]}, a rule-based voice assistant in VoxStudio. "
+            "I match keywords to scripted answers and speak them aloud. I'm a demo of the "
+            "speech pipeline, not a language model."
+        )
+    elif "interview" in text:
+        reply = (
+            "Use the STAR method: Situation, Task, Action and Result. Highlight your direct "
+            "contribution and any number that shows impact."
+        )
+    elif "voice" in text or "clone" in text:
+        reply = (
+            "Voice cloning extracts a speaker embedding from a short reference clip, then "
+            "conditions a synthesis model on it so new text keeps that timbre."
+        )
+    elif "python" in text or "code" in text or "bug" in text:
+        reply = (
+            "When debugging in Python, reproduce the failure in isolation, read the traceback "
+            "top to bottom, and lock the fix in with a test."
+        )
+    elif "language" in text or "translate" in text:
+        reply = (
+            "Translation maps text between languages, and text-to-speech then renders the "
+            "translated text with a target-language voice."
+        )
+    elif "thank" in text:
+        reply = "You're very welcome! Anything else you'd like to explore?"
+    elif len(history) > 0 and text in ("more", "continue", "go on", "and"):
+        reply = "Sure — tell me which part you'd like me to expand on."
+    else:
+        reply = (
+            f"Thanks for the question about '{user_input.strip()}'. I work on keyword matching, "
+            "so try asking about interviews, voice cloning, Python, or translation."
+        )
+
+    return reply, persona["voice"]

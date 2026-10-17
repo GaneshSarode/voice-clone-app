@@ -6,3 +6,7 @@ out.wav
 *.egg-info/
 dist/
 build/
+
+# Generated audio (never commit)
+outputs/
+cloned_voices/*/

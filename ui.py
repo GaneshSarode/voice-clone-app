@@ -1,9 +1,8 @@
-# ui.py - ElevenLabs Inspired UI & Styling System
+# ui.py - VoxStudio UI and styling system
 import streamlit as st
 
-ELEVENLABS_CUSTOM_CSS = """
+VOXSTUDIO_CSS = """
 <style>
-/* Main Page & Background */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 html, body, [class*="css"] {
@@ -16,7 +15,7 @@ html, body, [class*="css"] {
 }
 
 /* Header & Branding */
-.eleven-navbar {
+.vox-navbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -29,37 +28,37 @@ html, body, [class*="css"] {
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
-.eleven-brand {
+.vox-brand {
     display: flex;
     align-items: center;
     gap: 0.85rem;
 }
 
-.eleven-logo-badge {
+.vox-logo-badge {
     background: linear-gradient(135deg, #2563eb, #38bdf8);
     color: white;
     font-weight: 800;
     font-size: 1.15rem;
-    padding: 0.35rem 0.75rem;
+    padding: 0.35rem 0.7rem;
     border-radius: 8px;
     letter-spacing: -0.5px;
     box-shadow: 0 0 15px rgba(37, 99, 235, 0.5);
 }
 
-.eleven-brand-name {
+.vox-brand-name {
     font-size: 1.35rem;
     font-weight: 700;
     color: #ffffff;
     letter-spacing: -0.5px;
 }
 
-.eleven-tagline {
+.vox-tagline {
     font-size: 0.82rem;
     color: #94a3b8;
     margin-left: 0.5rem;
 }
 
-.eleven-status-pill {
+.vox-status-pill {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
@@ -72,7 +71,7 @@ html, body, [class*="css"] {
     color: #38bdf8;
 }
 
-.eleven-status-dot {
+.vox-status-dot {
     width: 7px;
     height: 7px;
     background-color: #10b981;
@@ -86,20 +85,14 @@ html, body, [class*="css"] {
     50% { opacity: 0.5; transform: scale(0.85); }
 }
 
-/* Card Containers */
-.eleven-card {
+/* Cards */
+.vox-card {
     background: #111827;
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 14px;
     padding: 1.5rem;
     margin-bottom: 1.25rem;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-    transition: all 0.2s ease;
-}
-
-.eleven-card:hover {
-    border-color: rgba(56, 189, 248, 0.25);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 
 .voice-card {
@@ -146,7 +139,7 @@ html, body, [class*="css"] {
     margin-bottom: 0.4rem;
 }
 
-/* Tabs styling */
+/* Tabs */
 .stTabs [data-baseweb="tab-list"] {
     gap: 8px;
     background-color: #111827;
@@ -192,12 +185,6 @@ html, body, [class*="css"] {
     border-color: rgba(255, 255, 255, 0.3);
 }
 
-/* Sliders */
-.stSlider [data-baseweb="slider"] {
-    padding-top: 10px;
-    padding-bottom: 10px;
-}
-
 /* Text Area */
 .stTextArea textarea {
     background-color: #111827 !important;
@@ -221,25 +208,6 @@ html, body, [class*="css"] {
     padding: 0.5rem;
 }
 
-/* Waveform Box */
-.waveform-preview {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    height: 36px;
-    padding: 0 8px;
-    background: rgba(15, 23, 42, 0.6);
-    border-radius: 8px;
-    margin: 8px 0;
-}
-
-.wave-bar {
-    width: 3px;
-    background: #38bdf8;
-    border-radius: 2px;
-    opacity: 0.8;
-}
-
 /* Character Counter */
 .char-counter {
     display: flex;
@@ -251,7 +219,7 @@ html, body, [class*="css"] {
 }
 
 /* Footer */
-.eleven-footer {
+.vox-footer {
     text-align: center;
     padding: 2.5rem 1rem 1.5rem 1rem;
     color: #64748b;
@@ -262,112 +230,108 @@ html, body, [class*="css"] {
 </style>
 """
 
+
 def inject_custom_styles():
-    """Injects custom ElevenLabs CSS into the Streamlit app."""
-    st.markdown(ELEVENLABS_CUSTOM_CSS, unsafe_allow_html=True)
+    """Inject the app's custom CSS."""
+    st.markdown(VOXSTUDIO_CSS, unsafe_allow_html=True)
 
 
 def render_header():
-    """Renders the top branding navigation bar in ElevenLabs style."""
-    st.markdown("""
-    <div class="eleven-navbar">
-        <div class="eleven-brand">
-            <span class="eleven-logo-badge">11</span>
+    """Render the top branding bar."""
+    st.markdown(
+        """
+    <div class="vox-navbar">
+        <div class="vox-brand">
+            <span class="vox-logo-badge">VS</span>
             <div>
-                <span class="eleven-brand-name">ElevenVoice Studio</span>
-                <span class="eleven-tagline">AI Voice Generator & Voice Agents Platform</span>
+                <span class="vox-brand-name">VoxStudio</span>
+                <span class="vox-tagline">Multilingual AI Voice &amp; Speech Toolkit</span>
             </div>
         </div>
         <div style="display: flex; gap: 0.6rem; align-items: center;">
-            <div class="eleven-status-pill">
-                <span class="eleven-status-dot"></span>
-                <span>Turbo v2.5 Online</span>
+            <div class="vox-status-pill">
+                <span class="vox-status-dot"></span>
+                <span>Neural TTS online</span>
             </div>
-            <div class="eleven-status-pill" style="color: #a78bfa; border-color: rgba(167, 139, 250, 0.3);">
-                <span>Hybrid XTTS + Neural</span>
+            <div class="vox-status-pill" style="color: #a78bfa; border-color: rgba(167, 139, 250, 0.3);">
+                <span>12 voices &middot; 6 languages</span>
             </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_sidebar():
-    """Renders the ElevenLabs sidebar with model options and statistics."""
+    """Render the sidebar controls and return the audio settings."""
     with st.sidebar:
-        st.markdown("""
+        st.markdown(
+            """
         <div style="display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem;">
-            <span style="background: #2563eb; color: white; padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: bold; font-size: 0.85rem;">11</span>
-            <span style="font-weight: 700; font-size: 1.1rem; color: #fff;">Voice Settings</span>
+            <span style="background: #2563eb; color: white; padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: bold; font-size: 0.85rem;">VS</span>
+            <span style="font-weight: 700; font-size: 1.1rem; color: #fff;">Audio Settings</span>
         </div>
-        """, unsafe_allow_html=True)
-
-        st.caption("AI Model Selection")
-        model_choice = st.selectbox(
-            "Generation Model",
-            [
-                "Eleven Multilingual v2 (Ultra-realistic, 29+ Langs)",
-                "Eleven English v1 (High-speed Studio)",
-                "Coqui XTTS v2 (Zero-shot Deep Voice Clone)"
-            ],
-            index=0,
-            help="Choose between lightning-fast natural Neural voices or local zero-shot deep cloning."
+        """,
+            unsafe_allow_html=True,
         )
 
-        st.markdown("---")
-        st.caption("Default Voice Parameters")
-
-        stability = st.slider(
-            "Stability",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.75,
-            step=0.05,
-            help="Higher values make speech more steady and consistent. Lower values add dramatic emotion and variation."
-        )
-
-        similarity_boost = st.slider(
-            "Clarity + Similarity Boost",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.85,
-            step=0.05,
-            help="Enhances overall voice clarity and likeness to the original reference audio."
-        )
+        st.caption("The engine is Microsoft edge-tts neural voices. Rate is applied "
+                   "during synthesis; pitch and gain are applied as post-processing.")
 
         speed_factor = st.slider(
-            "Speed Multiplier",
+            "Speech Rate",
             min_value=0.5,
             max_value=2.0,
             value=1.0,
             step=0.05,
-            help="Controls speech rate without altering audio pitch."
+            help="Speaking speed. Applied by the TTS engine as a rate change.",
+        )
+        pitch_semitones = st.slider(
+            "Pitch Shift (semitones)",
+            min_value=-6.0,
+            max_value=6.0,
+            value=0.0,
+            step=0.5,
+            help="Shifts pitch without changing speed (librosa post-processing).",
+        )
+        gain_db = st.slider(
+            "Volume Gain (dB)",
+            min_value=-10.0,
+            max_value=10.0,
+            value=0.0,
+            step=0.5,
+            help="Loudness adjustment applied after synthesis.",
         )
 
         st.markdown("---")
-        st.markdown("""
+        st.markdown(
+            """
         <div style="font-size: 0.78rem; color: #94a3b8; line-height: 1.5;">
             <b>⚡ Capabilities:</b><br/>
-            • 29+ World Languages<br/>
-            • Instant Voice Cloning (IVC)<br/>
-            • Speech-to-Speech Voice Changer<br/>
-            • Cross-Lingual Translation<br/>
-            • Interactive Voice Agent<br/>
+            • 12 built-in neural voices<br/>
+            • Voice profile library (reference-based)<br/>
+            • Speech-to-speech dubbing<br/>
+            • Translation across 6 languages<br/>
+            • Rule-based voice assistant<br/>
+            • Metrics: latency, RTF, spectral similarity
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
         return {
-            "model_choice": model_choice,
-            "stability": stability,
-            "similarity_boost": similarity_boost,
-            "speed_factor": speed_factor
+            "speed_factor": speed_factor,
+            "pitch_semitones": pitch_semitones,
+            "gain_db": gain_db,
         }
 
 
 def render_voice_card(voice_name, role_tag, accent, gender, desc, is_cloned=False):
-    """Renders a voice card in the voice library showcase."""
+    """Render a card for the voice library grid."""
     badge_color = "#10b981" if is_cloned else "#38bdf8"
     bg_color = "rgba(16, 185, 129, 0.15)" if is_cloned else "rgba(56, 189, 248, 0.15)"
-    label = "🧬 Cloned Voice" if is_cloned else f"{gender} • {accent}"
+    label = "🧬 Voice Profile" if is_cloned else f"{gender} • {accent}"
 
     return f"""
     <div class="voice-card">
@@ -388,10 +352,16 @@ def render_voice_card(voice_name, role_tag, accent, gender, desc, is_cloned=Fals
 
 
 def render_footer():
-    """Renders the page footer."""
-    st.markdown("""
-    <div class="eleven-footer">
-        <b>ElevenVoice Studio</b> — Inspired by ElevenLabs AI Voice Generator & Conversational Platform.<br/>
-        Zero-shot voice cloning powered by XTTS v2, Whisper ASR & Neural Edge Audio Engines.
+    """Render the page footer."""
+    st.markdown(
+        """
+    <div class="vox-footer">
+        <b>VoxStudio</b> — multilingual TTS, voice profiles, translation and a rule-based
+        voice assistant in one Streamlit app.<br/>
+        Speech synthesis by edge-tts (Microsoft neural voices) · optional Coqui XTTS v2 cloning ·
+        Whisper / Google Web Speech ASR · librosa audio metrics.<br/>
+        <span style="font-size: 0.75rem;">Built as a learning/portfolio project. Not affiliated with any commercial voice API.</span>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
