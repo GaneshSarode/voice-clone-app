@@ -93,6 +93,18 @@ CAPABILITY_MAP = {cap.key: cap for cap in CAPABILITIES}
 # Sidebar Configuration
 sidebar_settings = render_sidebar(capabilities=CAPABILITIES)
 
+@st.cache_resource
+def load_xtts_model():
+    """Load Coqui XTTS v2 for true zero-shot cloning if the environment supports it."""
+    try:
+        from TTS.api import TTS
+
+        return TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=False)
+    except Exception as exc:
+        print(f"XTTS load error: {exc}")
+        return None
+
+
 # The cloning engine is loaded only when the analyst explicitly turns it on: it
 # costs ~4 GB of RAM and ~90 s on CPU, and is cached for the server's lifetime.
 XTTS_MODEL = None
@@ -205,17 +217,6 @@ def load_translator_model(model_name, target_lang):
                 device=-1,
             )
         return pipeline("translation", model=model_name, device=-1)
-    except Exception:
-        return None
-
-
-@st.cache_resource
-def load_xtts_model():
-    """Load Coqui XTTS v2 for true zero-shot cloning if the environment supports it."""
-    try:
-        from TTS.api import TTS
-
-        return TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=False)
     except Exception:
         return None
 
