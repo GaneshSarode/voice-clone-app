@@ -453,7 +453,11 @@ with tabs[2]:
             with st.spinner("Transcribing speech with Whisper and resynthesizing into target voice..."):
                 try:
                     asr = load_asr_model()
-                    recognized_text, temp_wav = transcribe_audio_file(asr, source_audio)
+                    recognized_text, temp_wav, err = transcribe_audio_file(asr, source_audio)
+                    
+                    if not recognized_text:
+                        st.warning(f"⚠️ {err or 'Could not detect clear words in this recording.'}")
+                        st.stop()
                     
                     st.info(f"📝 Transcribed Input: *\"{recognized_text}\"*")
                     
@@ -511,8 +515,8 @@ with tabs[3]:
         )
         
         ml_text = st.text_area(
-            "Or type English text (if you don't have audio)",
-            placeholder="Type your English statement here...",
+            "Or type / paste statement to translate (optional if audio is uploaded)",
+            placeholder="Type your sentence here if you want to specify exact words...",
             key="ml_text_input"
         )
 
@@ -549,12 +553,17 @@ with tabs[3]:
                     speaker_path = None
                     if has_audio:
                         asr = load_asr_model()
-                        english_text, speaker_path = transcribe_audio_file(asr, ml_audio)
+                        transcribed_text, speaker_path, err = transcribe_audio_file(asr, ml_audio)
+                        
+                        if has_text:
+                            english_text = ml_text.strip()
+                        elif transcribed_text:
+                            english_text = transcribed_text
+                        else:
+                            st.warning(f"⚠️ {err or 'Could not detect clear words in the audio.'}")
+                            st.info("💡 You can type your sentence directly into the text box above to translate and generate speech.")
+                            st.stop()
                     else:
-                        english_text = ml_text.strip()
-
-                    # If user provided both audio AND typed custom text, prioritize typed text for translation
-                    if has_audio and has_text:
                         english_text = ml_text.strip()
 
                     lang_info = TRANSLATION_LANGS[target_lang]

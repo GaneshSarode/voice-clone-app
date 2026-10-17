@@ -230,7 +230,7 @@ def synthesize_xtts_clone(xtts_model, text, speaker_wav_path, language="en", out
 
 
 def transcribe_audio_file(asr_pipeline, audio_file):
-    """Transcribe uploaded audio file to English text using Whisper ASR or Google Web Speech."""
+    """Transcribe uploaded audio file to English/multilingual text using Whisper ASR or Google Web Speech."""
     audio_bytes = audio_file.read()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_bytes)
@@ -243,11 +243,11 @@ def transcribe_audio_file(asr_pipeline, audio_file):
             result = asr_pipeline(audio)
             text = result.get("text", "").strip()
             if text:
-                return text, temp_path
-        except Exception:
-            pass
+                return text, temp_path, None
+        except Exception as e:
+            print(f"Whisper ASR error: {e}")
 
-    # 2. Cloud-native SpeechRecognition (Google Web Speech API - free & fast)
+    # 2. Cloud-native SpeechRecognition (Google Web Speech API)
     try:
         import speech_recognition as sr
         data, sr_rate = librosa.load(temp_path, sr=16000, mono=True)
@@ -255,22 +255,32 @@ def transcribe_audio_file(asr_pipeline, audio_file):
         soundfile.write(converted_wav, data, 16000)
 
         recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 250
+        recognizer.dynamic_energy_threshold = True
+
         with sr.AudioFile(converted_wav) as source:
             audio_data = recognizer.record(source)
-            text = recognizer.recognize_google(audio_data)
 
         try:
             os.remove(converted_wav)
         except Exception:
             pass
 
-        if text and text.strip():
-            return text.strip(), temp_path
-    except Exception as e:
-        print(f"Speech recognition error: {e}")
+        # Try common accents: Indian English, US English, and Hindi
+        for lang_code in ["en-IN", "en-US", "hi-IN"]:
+            try:
+                text = recognizer.recognize_google(audio_data, language=lang_code)
+                if text and text.strip():
+                    return text.strip(), temp_path, None
+            except Exception:
+                continue
 
-    # 3. Fallback message only if recognition could not detect clear words
-    return "Could not transcribe audio clearly. Please ensure your recording is clear and audible.", temp_path
+    except ImportError:
+        return None, temp_path, "SpeechRecognition library is not installed on this cloud instance."
+    except Exception as e:
+        return None, temp_path, f"Speech recognition service error: {str(e)}"
+
+    return None, temp_path, "Could not detect clear words in the audio. The recording might be too quiet, noisy, or in an unsupported format."
 
 
 def translate_text(translator_pipeline, text, target_lang_code="hi"):
