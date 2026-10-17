@@ -1,6 +1,8 @@
 # logic.py - VoxStudio platform engine: synthesis, voice profiles, ASR,
 # translation, audio post-processing and evaluation metrics.
 import os
+import sys
+import io
 import json
 import uuid
 import asyncio
@@ -8,6 +10,7 @@ import logging
 import tempfile
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +18,16 @@ import numpy as np
 import librosa
 import soundfile
 import edge_tts
+
+# Windows consoles default to a legacy code page (e.g. cp1252). XTTS logs the
+# text it is about to synthesize, so a non-Latin script (Hindi, Japanese, ...)
+# raises UnicodeEncodeError *inside* the engine and aborts synthesis. Force UTF-8
+# with replacement so synthesis can never fail because of console encoding.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass
 
 logger = logging.getLogger("voxstudio")
 if not logger.handlers:
@@ -49,8 +62,18 @@ def safe_filename(name: str, fallback: str = "audio") -> str:
 
 
 def _user_dir(user_id: str = DEFAULT_USER) -> Path:
-    """Per-session storage directory so users never see each other's voices."""
-    directory = CLONED_VOICES_DIR / _safe_component(user_id)
+    """Resolve a session's storage directory without touching the filesystem.
+
+    Reads must not have write side effects: creating the directory here would
+    leave one empty directory behind for every session that ever loaded a page.
+    Writers call :func:`_ensure_user_dir` instead.
+    """
+    return CLONED_VOICES_DIR / _safe_component(user_id)
+
+
+def _ensure_user_dir(user_id: str = DEFAULT_USER) -> Path:
+    """Create the per-session storage directory, for write paths only."""
+    directory = _user_dir(user_id)
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -78,6 +101,176 @@ def cleanup_outputs(max_age_minutes: int = 120) -> int:
     if removed:
         logger.info("Cleaned up %d stale output file(s).", removed)
     return removed
+
+
+# ---------------------------------------------------------------------------
+# Engine capability detection
+#
+# The app must never claim a capability it does not have. These probes run at
+# startup and are cheap: they check importability and (for XTTS) whether the
+# weights are already on disk. They never load a multi-gigabyte model.
+# ---------------------------------------------------------------------------
+_CAPABILITY_CACHE = None
+
+
+def _tts_cache_roots():
+    """Known Coqui TTS cache locations, newest layout first."""
+    home = Path.home()
+    candidates = [
+        os.environ.get("TTS_HOME"),
+        str(home / ".local" / "share" / "tts"),
+        str(home / "AppData" / "Local" / "tts"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "tts") if os.environ.get("LOCALAPPDATA") else None,
+        os.path.join(os.environ.get("APPDATA", ""), "tts") if os.environ.get("APPDATA") else None,
+    ]
+    return [Path(c) for c in candidates if c]
+
+
+def xtts_model_cached() -> bool:
+    """True when the XTTS v2 checkpoint is already downloaded."""
+    for root in _tts_cache_roots():
+        try:
+            if any(root.glob("tts_models--multilingual--multi-dataset--xtts_v2/*.pth")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+@dataclass(frozen=True)
+class Capability:
+    """One engine's availability, with the honest reason either way."""
+
+    key: str
+    label: str
+    available: bool
+    detail: str
+
+
+def _detect_capabilities_uncached() -> list:
+    """Probe every optional engine and report availability + caveats.
+
+    This is deliberately non-fatal: a missing engine degrades one feature, it
+    does not stop the app.
+    """
+    capabilities = []
+
+    # 1. Neural TTS (edge-tts) - the always-available baseline.
+    try:
+        import edge_tts as _edge_tts  # noqa: F401
+
+        capabilities.append(
+            Capability(
+                "neural_tts",
+                "Neural TTS (edge-tts)",
+                True,
+                "Microsoft neural voices. Requires outbound internet.",
+            )
+        )
+    except Exception as exc:  # pragma: no cover - import guard
+        capabilities.append(
+            Capability("neural_tts", "Neural TTS (edge-tts)", False, f"Not importable: {exc}")
+        )
+
+    # 2. Voice cloning (Coqui XTTS v2).
+    try:
+        import TTS as _tts  # noqa: F401
+
+        cached = xtts_model_cached()
+        detail = (
+            "Model cached locally."
+            if cached
+            else "Weights (~1.8 GB) download on first use."
+        )
+        capabilities.append(
+            Capability(
+                "cloning",
+                "Voice cloning (XTTS v2)",
+                True,
+                f"{detail} Runs on CPU (~4x realtime) and needs ~4 GB RAM.",
+            )
+        )
+    except Exception as exc:
+        capabilities.append(
+            Capability(
+                "cloning",
+                "Voice cloning (XTTS v2)",
+                False,
+                f"Coqui TTS not importable: {exc}",
+            )
+        )
+
+    # 3. Local speech recognition (faster-whisper).
+    try:
+        import faster_whisper as _fw  # noqa: F401
+
+        capabilities.append(
+            Capability(
+                "asr_local",
+                "Local ASR (faster-whisper)",
+                True,
+                "Runs on CPU (int8). Audio never leaves the machine.",
+            )
+        )
+    except Exception as exc:
+        capabilities.append(
+            Capability("asr_local", "Local ASR (faster-whisper)", False, f"Not importable: {exc}")
+        )
+
+    # 4. Local translation (HuggingFace transformers).
+    try:
+        import transformers as _tf  # noqa: F401
+
+        capabilities.append(
+            Capability(
+                "translation_local",
+                "Local translation (transformers)",
+                True,
+                "Marian/M2M models. Large first-time download; fully local after.",
+            )
+        )
+    except Exception as exc:
+        capabilities.append(
+            Capability(
+                "translation_local",
+                "Local translation (transformers)",
+                False,
+                f"Not importable: {exc}",
+            )
+        )
+
+    return capabilities
+
+
+def detect_capabilities() -> list:
+    """Probe engines once per process.
+
+    Capability availability cannot change while the process runs, and Streamlit
+    re-executes the script on every interaction, so the (potentially slow)
+    import probes are memoised rather than repeated on each rerun.
+    """
+    global _CAPABILITY_CACHE
+    if _CAPABILITY_CACHE is None:
+        _CAPABILITY_CACHE = _detect_capabilities_uncached()
+    return _CAPABILITY_CACHE
+
+
+def capability_summary() -> dict:
+    """Convenience view: {key: available} for quick checks in the UI."""
+    return {cap.key: cap.available for cap in detect_capabilities()}
+
+
+# ---------------------------------------------------------------------------
+# Consent
+# ---------------------------------------------------------------------------
+class ConsentRequired(ValueError):
+    """Raised when a voice clone is requested without explicit consent."""
+
+
+CONSENT_REQUIRED_HINT = (
+    "I confirm that this is my own voice, or that I have the speaker's explicit "
+    "permission to clone it, and that I will not use it to impersonate or mislead anyone."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +411,21 @@ PRESET_VOICES = {
     },
 }
 
+# Neural voice used only when a voice profile cannot be cloned. Chosen from the
+# declared gender so the fallback is at least plausible; the UI always labels it
+# as a fallback so it is never mistaken for the profile's own voice.
+_FALLBACK_EDGE_VOICES = {
+    "Male": "en-US-ChristopherNeural",
+    "Female": "en-US-JennyNeural",
+    "Non-Binary": "en-US-AriaNeural",
+}
+DEFAULT_FALLBACK_EDGE_VOICE = "en-US-AriaNeural"
+
+
+def fallback_edge_voice(profile: dict) -> str:
+    """Neural voice to use when a voice profile cannot be cloned."""
+    return _FALLBACK_EDGE_VOICES.get((profile or {}).get("gender", ""), DEFAULT_FALLBACK_EDGE_VOICE)
+
 
 # ---------------------------------------------------------------------------
 # Voice profile storage (per session)
@@ -236,7 +444,7 @@ def load_cloned_voices_metadata(user_id: str = DEFAULT_USER) -> dict:
 
 
 def _write_metadata(metadata: dict, user_id: str = DEFAULT_USER) -> None:
-    with open(_metadata_file(user_id), "w", encoding="utf-8") as handle:
+    with open(_ensure_user_dir(user_id) / "voices_metadata.json", "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2)
 
 
@@ -248,18 +456,43 @@ def save_cloned_voice_file(
     gender="Unknown",
     accent="Custom",
     user_id: str = DEFAULT_USER,
+    consent_confirmed: bool = False,
+    consent_note: str = "",
+    consent_owner: str = "",
 ):
     """Store a reference recording as a reusable voice profile.
 
-    Note: this registers a *profile* (the reference sample used by the XTTS v2
-    engine for true zero-shot cloning when that engine is available). It does not
-    itself train or extract a speaker embedding.
-    """
-    voice_id = f"voice_{uuid.uuid4().hex[:12]}"
-    file_path = _user_dir(user_id) / f"{voice_id}.wav"
+    The reference sample is what the XTTS v2 engine conditions on for true
+    zero-shot cloning. This does not train or extract a speaker embedding.
 
-    with open(file_path, "wb") as handle:
-        handle.write(audio_bytes)
+    Cloning requires explicit consent: ``consent_confirmed`` must be True, and
+    the confirmation is recorded with the profile so the basis for use is
+    auditable. The uploaded audio is decoded and normalised to 16 kHz mono WAV
+    (uploads may be MP3, which would otherwise not be usable as a ``.wav``).
+    """
+    if not consent_confirmed:
+        raise ConsentRequired(
+            "Voice cloning requires explicit confirmation that you own this voice "
+            "or have the speaker's permission to clone it."
+        )
+
+    if not audio_bytes:
+        raise ValueError("The uploaded audio sample is empty.")
+
+    try:
+        samples, _sr = librosa.load(io.BytesIO(audio_bytes), sr=16000, mono=True)
+    except Exception as exc:
+        raise ValueError(f"Could not decode the uploaded audio: {exc}") from exc
+
+    if samples.size < 16000:  # shorter than ~1 second
+        raise ValueError(
+            "The uploaded sample is too short. Please provide at least a few "
+            "seconds of clear speech."
+        )
+
+    voice_id = f"voice_{uuid.uuid4().hex[:12]}"
+    file_path = _ensure_user_dir(user_id) / f"{voice_id}.wav"
+    soundfile.write(str(file_path), samples, 16000)
 
     metadata = load_cloned_voices_metadata(user_id)
     metadata[voice_id] = {
@@ -270,12 +503,26 @@ def save_cloned_voice_file(
         "role": role,
         "desc": description or "Voice profile created from an uploaded reference sample.",
         "audio_path": str(file_path),
+        "sample_rate": 16000,
+        "duration_s": round(float(samples.size) / 16000.0, 2),
         "is_cloned": True,
         "avatar": "🧬",
+        "consent": {
+            "confirmed": True,
+            "confirmed_at": datetime.now().isoformat(timespec="seconds"),
+            "declared_owner": consent_owner.strip() or "self",
+            "note": consent_note.strip(),
+        },
     }
     _write_metadata(metadata, user_id)
     logger.info("Saved voice profile '%s' (%s) for session %s.", name, voice_id, user_id)
     return metadata[voice_id]
+
+
+def profile_has_consent(profile: dict) -> bool:
+    """True when a stored voice profile carries a recorded consent confirmation."""
+    consent = (profile or {}).get("consent") or {}
+    return bool(consent.get("confirmed"))
 
 
 def delete_cloned_voice(voice_id: str, user_id: str = DEFAULT_USER) -> bool:
@@ -286,12 +533,23 @@ def delete_cloned_voice(voice_id: str, user_id: str = DEFAULT_USER) -> bool:
         return False
 
     audio_path = Path(record.get("audio_path", ""))
-    # Only ever delete files we created inside this session's directory.
-    if audio_path.exists() and _user_dir(user_id) in audio_path.resolve().parents:
+    # Only ever delete files we created inside this session's directory. Resolve
+    # both sides first: on Windows the same directory can be reported with an 8.3
+    # short name in one place and the long name in another, which would otherwise
+    # make an owned file look foreign and leak it.
+    try:
+        resolved_audio = audio_path.resolve()
+        resolved_root = _user_dir(user_id).resolve()
+        owned = resolved_audio.parent == resolved_root or resolved_root in resolved_audio.parents
+    except OSError as exc:
+        logger.warning("Could not resolve %s: %s", audio_path, exc)
+        owned = False
+
+    if owned and resolved_audio.exists():
         try:
-            audio_path.unlink()
+            resolved_audio.unlink()
         except OSError as exc:
-            logger.warning("Could not delete %s: %s", audio_path, exc)
+            logger.warning("Could not delete %s: %s", resolved_audio, exc)
 
     del metadata[voice_id]
     _write_metadata(metadata, user_id)
@@ -301,6 +559,82 @@ def delete_cloned_voice(voice_id: str, user_id: str = DEFAULT_USER) -> bool:
 # ---------------------------------------------------------------------------
 # Synthesis
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class SynthesisPlan:
+    """How a piece of text will actually be spoken, and why.
+
+    ``engine`` is "xtts" only when the reference sample will genuinely be used
+    for zero-shot cloning. Every other case resolves to the neural engine and
+    says so, so a "voice profile" can never silently speak with an unrelated
+    built-in voice.
+    """
+
+    engine: str
+    label: str
+    reference_path: str
+    edge_voice: str
+    reason: str
+    is_true_clone: bool
+
+
+def plan_synthesis(voice_info, *, cloning_enabled, cloning_loaded) -> SynthesisPlan:
+    """Resolve the synthesis engine for one voice without silent substitution."""
+    is_cloned = bool((voice_info or {}).get("is_cloned"))
+    reference_path = (voice_info or {}).get("audio_path")
+    edge_voice = (voice_info or {}).get("edge_voice") or "en-US-ChristopherNeural"
+    has_reference = bool(reference_path) and os.path.exists(str(reference_path))
+
+    if not is_cloned:
+        return SynthesisPlan(
+            engine="neural",
+            label="Neural TTS (edge-tts)",
+            reference_path="",
+            edge_voice=edge_voice,
+            reason="Built-in neural voice.",
+            is_true_clone=False,
+        )
+
+    # A voice profile: cloning is the whole point, so be explicit when it cannot happen.
+    if not has_reference:
+        return SynthesisPlan(
+            engine="neural",
+            label="Neural fallback - no reference audio",
+            reference_path="",
+            edge_voice=edge_voice,
+            reason="This voice profile has no usable reference recording, so it speaks "
+            "with a built-in voice instead of the reference.",
+            is_true_clone=False,
+        )
+    if not cloning_enabled:
+        return SynthesisPlan(
+            engine="neural",
+            label="Neural fallback - cloning turned off",
+            reference_path="",
+            edge_voice=edge_voice,
+            reason="Cloning is turned off, so this profile speaks with a built-in voice, "
+            "not the reference sample.",
+            is_true_clone=False,
+        )
+    if not cloning_loaded:
+        return SynthesisPlan(
+            engine="neural",
+            label="Neural fallback - cloning engine unavailable",
+            reference_path="",
+            edge_voice=edge_voice,
+            reason="The XTTS v2 cloning engine could not be loaded, so this profile speaks "
+            "with a built-in voice instead of the reference sample.",
+            is_true_clone=False,
+        )
+    return SynthesisPlan(
+        engine="xtts",
+        label="XTTS v2 zero-shot clone",
+        reference_path=str(reference_path),
+        edge_voice=edge_voice,
+        reason="Reference sample is cloned with XTTS v2.",
+        is_true_clone=True,
+    )
+
+
 def rate_string_from_speed(speed_factor: float) -> str:
     """Convert a speed multiplier into an edge-tts rate string."""
     rate_percent = int(round((float(speed_factor) - 1.0) * 100))
@@ -340,6 +674,8 @@ def synthesize_neural_speech(text, edge_voice, speed_factor=1.0, output_path=Non
 
 def synthesize_xtts_clone(xtts_model, text, speaker_wav_path, language="en", output_path=None):
     """Generate cloned speech with Coqui XTTS v2 from a reference sample."""
+    if not text or not text.strip():
+        raise ValueError("Cannot synthesize empty text.")
     if output_path is None:
         output_path = str(new_output_path("clone", "wav"))
     xtts_model.tts_to_file(
@@ -349,6 +685,22 @@ def synthesize_xtts_clone(xtts_model, text, speaker_wav_path, language="en", out
         file_path=str(output_path),
         split_sentences=True,
     )
+    return str(output_path)
+
+
+def prepare_reference_wav(audio_path, output_path=None):
+    """Decode any supported audio into a 16 kHz mono WAV for XTTS conditioning.
+
+    Uploads may be MP3/M4A (or MP3 bytes in a file named ``.wav``), which XTTS
+    cannot reliably condition on. Decoding to a real 16 kHz mono WAV removes the
+    format ambiguity and the sample-rate mismatch in one place.
+    """
+    samples, _sample_rate = librosa.load(str(audio_path), sr=16000, mono=True)
+    if not samples.size:
+        raise ValueError("The reference recording could not be decoded.")
+    if output_path is None:
+        output_path = str(new_output_path("reference", "wav"))
+    soundfile.write(str(output_path), samples, 16000)
     return str(output_path)
 
 
@@ -387,8 +739,30 @@ def postprocess_audio(input_path, pitch_semitones=0.0, gain_db=0.0, output_path=
 # ---------------------------------------------------------------------------
 # Speech recognition
 # ---------------------------------------------------------------------------
-def transcribe_audio_file(asr_pipeline, audio_file):
-    """Transcribe an uploaded audio file via a local ASR model or Google Web Speech."""
+@dataclass
+class TranscriptionResult:
+    """A transcription plus the backend that produced it."""
+
+    text: str = None
+    audio_path: str = ""
+    error: str = None
+    backend: str = "none"
+    language: str = None
+    language_probability: float = None
+
+    def __iter__(self):
+        """Keep legacy ``text, path, error = result`` unpacking working."""
+        return iter((self.text, self.audio_path, self.error))
+
+
+def transcribe_audio_file(asr_pipeline, audio_file, *, allow_cloud=True, language=None):
+    """Transcribe an uploaded audio file and report which backend was used.
+
+    Local engines (faster-whisper or a HuggingFace pipeline) run first. Google
+    Web Speech is only used when ``allow_cloud`` is True, because it uploads the
+    audio to Google. ``language`` is an optional hint; when omitted the model
+    auto-detects and the detected language is returned.
+    """
     audio_bytes = audio_file.read()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_bytes)
@@ -398,21 +772,43 @@ def transcribe_audio_file(asr_pipeline, audio_file):
     if asr_pipeline is not None:
         try:
             if hasattr(asr_pipeline, "transcribe"):
-                segments, _info = asr_pipeline.transcribe(temp_path, beam_size=1)
+                kwargs = {"beam_size": 1}
+                if language:
+                    kwargs["language"] = language
+                segments, info = asr_pipeline.transcribe(temp_path, **kwargs)
                 text = " ".join(segment.text for segment in segments).strip()
                 if text:
-                    return text, temp_path, None
+                    probability = getattr(info, "language_probability", None)
+                    return TranscriptionResult(
+                        text=text,
+                        audio_path=temp_path,
+                        backend="faster-whisper (local)",
+                        language=getattr(info, "language", language),
+                        language_probability=(round(float(probability), 3) if probability else None),
+                    )
             else:
                 audio, _ = librosa.load(temp_path, sr=16000)
                 result = asr_pipeline(audio)
                 text = result.get("text", "").strip()
                 if text:
-                    return text, temp_path, None
+                    return TranscriptionResult(
+                        text=text,
+                        audio_path=temp_path,
+                        backend="transformers ASR (local)",
+                        language=language,
+                    )
         except Exception as exc:
             logger.warning("Local ASR failed, falling back to cloud STT: %s", exc)
 
-    # 2. Cloud STT (Google Web Speech via SpeechRecognition).
-    #    NOTE: audio is uploaded to Google's service for transcription.
+    # 2. Cloud STT (Google Web Speech). Only with consent: audio leaves the machine.
+    if not allow_cloud:
+        return TranscriptionResult(
+            audio_path=temp_path,
+            backend="none",
+            error="Local speech recognition could not read this audio, and cloud "
+            "transcription is disabled. Try a clearer recording or raise the model size.",
+        )
+
     try:
         import speech_recognition as sr
 
@@ -432,41 +828,78 @@ def transcribe_audio_file(asr_pipeline, audio_file):
         except OSError:
             pass
 
-        for lang_code in ("en-IN", "en-US", "hi-IN"):
+        language_candidates = tuple(dict.fromkeys(c for c in (language, "en-IN", "en-US", "hi-IN") if c))
+        for lang_code in language_candidates:
             try:
                 text = recognizer.recognize_google(audio_data, language=lang_code)
                 if text and text.strip():
-                    return text.strip(), temp_path, None
+                    return TranscriptionResult(
+                        text=text.strip(),
+                        audio_path=temp_path,
+                        backend="Google Web Speech (cloud)",
+                        language=lang_code,
+                    )
             except sr.UnknownValueError:
                 continue
             except sr.RequestError as exc:
-                return None, temp_path, f"Speech service error: {exc}"
+                return TranscriptionResult(
+                    audio_path=temp_path,
+                    backend="none",
+                    error=f"Speech service error: {exc}",
+                )
     except ImportError:
-        return None, temp_path, "SpeechRecognition is not installed on this instance."
+        return TranscriptionResult(
+            audio_path=temp_path,
+            backend="none",
+            error="SpeechRecognition is not installed on this instance.",
+        )
     except Exception as exc:
-        return None, temp_path, f"Speech recognition error: {exc}"
+        return TranscriptionResult(
+            audio_path=temp_path,
+            backend="none",
+            error=f"Speech recognition error: {exc}",
+        )
 
-    return (
-        None,
-        temp_path,
-        "Could not detect clear words. The recording may be too quiet, noisy, or unsupported.",
+    return TranscriptionResult(
+        audio_path=temp_path,
+        backend="none",
+        error="Could not detect clear words. The recording may be too quiet, noisy, or unsupported.",
     )
 
 
 # ---------------------------------------------------------------------------
 # Translation
 # ---------------------------------------------------------------------------
-def translate_text(translator_pipeline, text, target_lang_code="hi"):
-    """Translate text with a HuggingFace pipeline, falling back to MyMemory.
+class TranslationResult(str):
+    """A translated string that also records which backend produced it."""
 
-    NOTE: the MyMemory fallback sends the text to a public web service.
+    backend: str
+
+    def __new__(cls, text, backend):
+        instance = super().__new__(cls, text)
+        instance.backend = backend
+        return instance
+
+    def __getnewargs__(self):
+        # Keep copy/pickle round-trips working.
+        return (str(self), self.backend)
+
+
+def translate_text(translator_pipeline, text, target_lang_code="hi", *, allow_cloud=True):
+    """Translate text and record which backend produced the result.
+
+    The local HuggingFace pipeline is preferred. The MyMemory fallback sends the
+    text to a public web service, so it is only used when ``allow_cloud`` is True.
     """
     if translator_pipeline is not None:
         try:
             result = translator_pipeline(text)
-            return result[0]["translation_text"]
+            return TranslationResult(result[0]["translation_text"], "transformers (local)")
         except Exception as exc:
             logger.warning("HF translation failed, using fallback: %s", exc)
+
+    if not allow_cloud:
+        return TranslationResult(text, "none - cloud disabled (text unchanged)")
 
     try:
         url = (
@@ -478,11 +911,11 @@ def translate_text(translator_pipeline, text, target_lang_code="hi"):
             payload = json.loads(response.read().decode())
             translated = payload.get("responseData", {}).get("translatedText")
             if translated:
-                return translated
+                return TranslationResult(translated, "MyMemory (cloud)")
     except Exception as exc:
         logger.warning("Fallback translation failed: %s", exc)
 
-    return text
+    return TranslationResult(text, "none - translation failed (text unchanged)")
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +981,149 @@ def speaker_similarity(reference_path, candidate_path):
     except Exception as exc:
         logger.warning("Similarity computation failed: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Voice conversion (speech-to-speech morph)
+#
+# Converts the *timbre* of source speech toward a target speaker while keeping
+# the source's words and timing, because it transforms the actual waveform
+# instead of re-synthesising text. It is honest DSP - pitch/register matching
+# plus mean spectral-envelope transfer - not a trained neural VC model. A
+# neural converter (e.g. OpenVoice / RVC) would sound more like the target but
+# needs torch and a GPU, which the hosted CPU tier does not provide.
+# ---------------------------------------------------------------------------
+DEFAULT_CONVERSION_SR = 22050
+
+
+@dataclass
+class VoiceConversionResult:
+    """Outcome of a voice morph, with the numbers needed to judge it."""
+
+    output_path: str
+    source_pitch_hz: float = None
+    target_pitch_hz: float = None
+    semitones: float = 0.0
+    sample_rate: int = DEFAULT_CONVERSION_SR
+    duration_s: float = None
+
+
+def estimate_pitch_hz(samples, sample_rate, fmin=60.0, fmax=400.0):
+    """Median voiced F0 in Hz, or None when it cannot be estimated.
+
+    Uses YIN on the raw waveform and keeps only in-range frames, so silence and
+    unvoiced noise do not drag the estimate toward the extremes.
+    """
+    try:
+        if samples.size < sample_rate * 0.1:
+            return None
+        f0 = librosa.yin(samples, fmin=fmin, fmax=fmax, sr=sample_rate, frame_length=2048)
+        f0 = f0[np.isfinite(f0)]
+        f0 = f0[(f0 >= fmin) & (f0 <= fmax)]
+        if f0.size == 0:
+            return None
+        return round(float(np.median(f0)), 1)
+    except Exception as exc:
+        logger.warning("Pitch estimation failed: %s", exc)
+        return None
+
+
+def _mean_logmel_db(samples, sample_rate, n_mels=40, n_fft=2048, hop_length=512):
+    """Mean log-mel power envelope in dB with a fixed reference.
+
+    ``ref=1.0`` (rather than ``ref=np.max``) keeps the values comparable across
+    different clips, which the envelope transfer below relies on.
+    """
+    mel = librosa.feature.melspectrogram(
+        y=samples, sr=sample_rate, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
+    )
+    return librosa.power_to_db(mel, ref=1.0).mean(axis=1)
+
+
+def _zscore(vec):
+    return (vec - vec.mean()) / (vec.std() + 1e-9)
+
+
+def _smooth_bands(vec, width=3):
+    """Moving average across mel bands, to avoid narrow-band artefacts."""
+    if width <= 1 or vec.size < width:
+        return vec
+    return np.convolve(vec, np.ones(width, dtype=float) / width, mode="same")
+
+
+def _apply_spectral_envelope(samples, sample_rate, target_profile_db, max_gain_db=9.0,
+                             n_fft=2048, hop_length=512, n_mels=40):
+    """Tilt the magnitude spectrum so its mel envelope matches the target's.
+
+    Phase is left untouched, so timing and intelligibility are preserved while
+    the perceived timbre moves toward the target speaker.
+    """
+    mel_basis = librosa.filters.mel(sr=sample_rate, n_fft=n_fft, n_mels=n_mels)
+    spectrum = librosa.stft(samples, n_fft=n_fft, hop_length=hop_length)
+    magnitude, phase = np.abs(spectrum), np.angle(spectrum)
+
+    source_profile_db = librosa.power_to_db(mel_basis @ (magnitude ** 2), ref=1.0).mean(axis=1)
+    gain_db = np.clip(target_profile_db - source_profile_db, -max_gain_db, max_gain_db)
+    gain_db = _smooth_bands(gain_db, 3)
+
+    # Project per-mel-band gains onto FFT bins via the band-centre frequencies.
+    bin_freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=n_fft)
+    band_freqs = librosa.mel_frequencies(n_mels=n_mels, fmin=0.0, fmax=sample_rate / 2.0)
+    bin_gain = np.interp(bin_freqs, band_freqs, 10.0 ** (gain_db / 20.0))
+
+    boosted = magnitude * bin_gain[:, None]
+    return librosa.istft(boosted * np.exp(1j * phase), hop_length=hop_length, length=len(samples))
+
+
+def morph_voice(source_path, target_path, strength=1.0, sample_rate=DEFAULT_CONVERSION_SR,
+                max_pitch_ratio=2.0):
+    """Convert source speech toward the target speaker's timbre.
+
+    Steps: match the median pitch toward the target (bounded, so an odd estimate
+    cannot produce a cartoon voice) and transfer the target's mean spectral
+    envelope. Returns a :class:`VoiceConversionResult`.
+    """
+    source, _ = librosa.load(str(source_path), sr=sample_rate, mono=True)
+    if source.size < sample_rate * 0.2:
+        raise ValueError("Source audio is too short to convert (need at least ~0.2 s).")
+
+    target, _ = librosa.load(str(target_path), sr=sample_rate, mono=True)
+    if target.size < sample_rate * 0.2:
+        raise ValueError("Target reference audio is too short to characterise.")
+
+    source_pitch = estimate_pitch_hz(source, sample_rate)
+    target_pitch = estimate_pitch_hz(target, sample_rate)
+
+    converted = source
+    semitones = 0.0
+    if source_pitch and target_pitch:
+        ratio = target_pitch / source_pitch
+        if (1.0 / max_pitch_ratio) <= ratio <= max_pitch_ratio:
+            semitones = float(np.clip(12.0 * np.log2(ratio) * float(strength), -10.0, 10.0))
+            if abs(semitones) >= 0.1:
+                converted = librosa.effects.pitch_shift(converted, sr=sample_rate, n_steps=semitones)
+
+    try:
+        converted = _apply_spectral_envelope(converted, sample_rate, _mean_logmel_db(target, sample_rate))
+    except Exception as exc:
+        logger.warning("Spectral envelope transfer failed (%s); keeping the pitch shift only.", exc)
+
+    peak = float(np.max(np.abs(converted))) if converted.size else 0.0
+    if peak > 1.0:
+        converted = converted / peak
+
+    output_path = str(new_output_path("converted", "wav"))
+    soundfile.write(output_path, converted, sample_rate)
+    logger.info("Morphed %s toward %s (%.2f semitones).", source_path, target_path, semitones)
+
+    return VoiceConversionResult(
+        output_path=output_path,
+        source_pitch_hz=source_pitch,
+        target_pitch_hz=target_pitch,
+        semitones=round(semitones, 2),
+        sample_rate=sample_rate,
+        duration_s=round(float(converted.size) / sample_rate, 2),
+    )
 
 
 # ---------------------------------------------------------------------------

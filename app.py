@@ -2,6 +2,7 @@
 import os
 import time
 import uuid
+import tempfile
 import streamlit as st
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from ui import (
 from logic import (
     PRESET_VOICES,
     AGENT_PERSONAS,
+    CONSENT_REQUIRED_HINT,
     load_cloned_voices_metadata,
     save_cloned_voice_file,
     delete_cloned_voice,
@@ -26,8 +28,16 @@ from logic import (
     postprocess_audio,
     generation_metrics,
     speaker_similarity,
+    morph_voice,
     cleanup_outputs,
     safe_filename,
+    detect_capabilities,
+    plan_synthesis,
+    profile_has_consent,
+    fallback_edge_voice,
+    prepare_reference_wav,
+    ConsentRequired,
+    xtts_model_cached,
 )
 
 # -------- Streamlit Page Configuration --------
@@ -59,12 +69,51 @@ cleanup_outputs(max_age_minutes=120)
 # Top Header Navigation
 render_header()
 
+# Engine capability detection. Cheap by design: it checks importability and
+# whether the XTTS weights are on disk, and never loads a multi-gigabyte model.
+CAPABILITIES = detect_capabilities()
+CAPABILITY_MAP = {cap.key: cap for cap in CAPABILITIES}
+
 # Sidebar Configuration
-sidebar_settings = render_sidebar()
+sidebar_settings = render_sidebar(capabilities=CAPABILITIES)
+
+# The cloning engine is loaded only when the analyst explicitly turns it on: it
+# costs ~4 GB of RAM and ~90 s on CPU, and is cached for the server's lifetime.
+XTTS_MODEL = None
+if sidebar_settings["enable_cloning"] and CAPABILITY_MAP["cloning"].available:
+    with st.spinner("Loading the XTTS v2 cloning engine (one-time, ~90 s on CPU)..."):
+        XTTS_MODEL = load_xtts_model()
+    if XTTS_MODEL is None:
+        st.error(
+            "The XTTS v2 cloning engine could not be loaded on this machine. "
+            "Voice profiles will speak with a built-in neural voice instead."
+        )
+
+CLONING_LOADED = XTTS_MODEL is not None
+ALLOW_CLOUD = not sidebar_settings["local_only"]
 
 
 def audio_mime(path):
     return "audio/mpeg" if str(path).lower().endswith(".mp3") else "audio/wav"
+
+
+def resolve_plan(voice_info):
+    """How this voice will be produced right now, with an honest reason."""
+    return plan_synthesis(
+        voice_info,
+        cloning_enabled=sidebar_settings["enable_cloning"],
+        cloning_loaded=CLONING_LOADED,
+    )
+
+
+def show_engine_notice(plan):
+    """Render the resolved engine honestly; warn whenever a clone cannot clone."""
+    if plan.is_true_clone:
+        st.success(f"🧬 Engine: **{plan.label}** — {plan.reason}")
+    elif plan.engine == "neural" and "fallback" in plan.label.lower():
+        st.warning(f"⚠️ **{plan.label}** — {plan.reason}")
+    else:
+        st.caption(f"Engine: **{plan.label}** — {plan.reason}")
 
 
 def render_metrics(metrics, similarity=None):
@@ -81,14 +130,35 @@ def render_metrics(metrics, similarity=None):
         st.caption("*Correlation of the log-mel spectral envelope vs. the reference sample — a lightweight proxy, not trained speaker verification.")
 
 
+def materialize_upload(uploaded, fallback_suffix=".wav"):
+    """Persist a Streamlit upload or mic recording to a temporary file path."""
+    try:
+        uploaded.seek(0)
+    except Exception:
+        pass
+    data = uploaded.read()
+    if not data:
+        raise ValueError("The provided audio is empty.")
+    suffix = os.path.splitext(getattr(uploaded, "name", "") or "")[1] or fallback_suffix
+    handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        handle.write(data)
+    finally:
+        handle.close()
+    return handle.name
+
+
 # -------- Model Loading Cached Functions --------
 @st.cache_resource
-def load_asr_model():
-    """Load a lightweight local Whisper model for CPU transcription."""
+def load_asr_model(size="tiny"):
+    """Load a local faster-whisper model for CPU transcription (no network).
+
+    Cached per ``size`` so switching model size is the only thing that reloads.
+    """
     try:
         from faster_whisper import WhisperModel
 
-        return WhisperModel("tiny", device="cpu", compute_type="int8")
+        return WhisperModel(size, device="cpu", compute_type="int8")
     except Exception:
         try:
             from transformers import pipeline
@@ -181,6 +251,18 @@ TRANSLATION_LANGS = {
     },
 }
 
+# Language hints for speech recognition. None lets the model auto-detect, in
+# which case the detected language and its confidence are reported back.
+STT_LANGUAGE_CODES = {
+    "Auto-detect": None,
+    "English": "en",
+    "Hindi": "hi",
+    "French": "fr",
+    "Japanese": "ja",
+    "Spanish": "es",
+    "German": "de",
+}
+
 
 def get_all_available_voices(user_id):
     """Combine preset voices with this session's registered voice profiles."""
@@ -198,9 +280,12 @@ def get_all_available_voices(user_id):
             "accent": profile.get("accent", "Reference"),
             "role": profile.get("role", "Voice Profile"),
             "desc": profile.get("desc", "Reference-based voice profile"),
-            "edge_voice": "en-US-ChristopherNeural",
+            # Only used when the reference cannot be cloned; plan_synthesis always
+            # labels that case as a fallback so it is never mistaken for the clone.
+            "edge_voice": fallback_edge_voice(profile),
             "audio_path": profile.get("audio_path"),
             "is_cloned": True,
+            "has_consent": profile_has_consent(profile),
             "avatar": "🧬",
         }
     return all_voices
@@ -211,8 +296,9 @@ available_voices = get_all_available_voices(USER_ID)
 # -------- Main Navigation Tabs --------
 tabs = st.tabs([
     "🎙️ Text to Speech",
+    "📝 Transcribe (STT)",
     "🧬 Voice Profiles",
-    "🔄 Speech-to-Speech Dubbing",
+    "🎛️ Voice Changer",
     "🌍 Multilingual Translator",
     "🤖 Voice Assistant",
     "📚 Voice Library",
@@ -234,21 +320,21 @@ with tabs[0]:
     </div>
     """, unsafe_allow_html=True)
 
-    col_voice, col_model = st.columns([2, 1])
+    col_voice, col_engine = st.columns([2, 1])
     with col_voice:
         selected_voice_key = st.selectbox(
             "Select Voice Persona",
             list(available_voices.keys()),
             index=0,
         )
-    with col_model:
-        tts_engine = st.selectbox(
-            "Engine",
-            ["Neural engine (fast)", "XTTS v2 cloning (needs GPU)"],
-            index=0,
-        )
-
     voice_info = available_voices[selected_voice_key]
+
+    # Resolve the engine *before* synthesising so the choice is visible up front
+    # and never silently substituted (see logic.plan_synthesis).
+    tts_plan = resolve_plan(voice_info)
+    with col_engine:
+        st.markdown("**Generation Engine**")
+        show_engine_notice(tts_plan)
 
     st.markdown(f"""
     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; padding: 0.85rem 1.2rem; margin-bottom: 1.2rem; display: flex; align-items: center; justify-content: space-between;">
@@ -294,29 +380,19 @@ with tabs[0]:
             with st.spinner("Synthesizing audio..."):
                 start_ts = time.time()
                 try:
-                    used_xtts = False
-                    source_path = None
-                    reference_path = voice_info.get("audio_path")
+                    reference_path = tts_plan.reference_path or None
+                    used_xtts = tts_plan.engine == "xtts"
 
-                    if "XTTS" in tts_engine and voice_info.get("is_cloned") and reference_path:
-                        xtts = load_xtts_model()
-                        if xtts is not None:
-                            source_path = synthesize_xtts_clone(
-                                xtts_model=xtts,
-                                text=input_text,
-                                speaker_wav_path=reference_path,
-                            )
-                            used_xtts = True
-                        else:
-                            st.info(
-                                "💡 The XTTS v2 engine needs a GPU/high-RAM machine and is not "
-                                "available here, so the fast neural engine is used instead."
-                            )
-
-                    if not used_xtts:
+                    if used_xtts:
+                        source_path = synthesize_xtts_clone(
+                            xtts_model=XTTS_MODEL,
+                            text=input_text,
+                            speaker_wav_path=tts_plan.reference_path,
+                        )
+                    else:
                         source_path = synthesize_neural_speech(
                             text=input_text,
-                            edge_voice=voice_info.get("edge_voice", "en-US-ChristopherNeural"),
+                            edge_voice=tts_plan.edge_voice,
                             speed_factor=sidebar_settings["speed_factor"],
                         )
 
@@ -334,7 +410,7 @@ with tabs[0]:
                         else None
                     )
 
-                    engine_label = "XTTS v2 clone" if used_xtts else "Neural engine"
+                    engine_label = tts_plan.label
                     st.session_state.history.append({
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "voice": voice_info["name"],
@@ -345,7 +421,7 @@ with tabs[0]:
                         "similarity": similarity,
                     })
 
-                    st.success(f"🎉 Speech synthesized with the {engine_label}.")
+                    st.success(f"🎉 Speech synthesized — {engine_label}.")
                     st.audio(output_file)
                     render_metrics(metrics, similarity)
 
@@ -362,19 +438,125 @@ with tabs[0]:
 
 
 # ==============================================================================
-# TAB 2: VOICE PROFILES (reference-based)
+# TAB 2: TRANSCRIBE (SPEECH TO TEXT)
 # ==============================================================================
 with tabs[1]:
     st.markdown("""
     <div style="margin-bottom: 1rem;">
-        <h3 style="margin: 0; color: #fff;">Voice Profiles</h3>
+        <h3 style="margin: 0; color: #fff;">Speech to Text</h3>
         <p style="color: #94a3b8; font-size: 0.88rem; margin: 0;">
-            Upload a clean reference recording (10–60s) to register a reusable voice profile.
-            Profiles are stored per session. When the XTTS v2 engine is available, a profile is
-            used for true zero-shot cloning; otherwise it maps to a built-in neural voice.
+            Transcribe a recording with a local Whisper model. The audio is processed on this
+            machine; Google Web Speech is used only as a fallback, and only when it is allowed.
         </p>
     </div>
     """, unsafe_allow_html=True)
+
+    stt_audio = st.file_uploader(
+        "Upload audio (WAV, MP3, M4A, FLAC, OGG)",
+        type=["wav", "mp3", "m4a", "flac", "ogg"],
+        key="stt_upload",
+    )
+    if stt_audio:
+        st.audio(stt_audio)
+
+    stt_col1, stt_col2, stt_col3 = st.columns(3)
+    with stt_col1:
+        stt_model_size = st.selectbox(
+            "Whisper model size",
+            ["tiny", "base", "small"],
+            index=0,
+            help="Larger models are more accurate and noticeably slower on CPU.",
+        )
+    with stt_col2:
+        stt_language_label = st.selectbox(
+            "Language",
+            list(STT_LANGUAGE_CODES.keys()),
+            index=0,
+            help="A hint improves speed and accuracy. Auto-detect reports the detected language.",
+        )
+    with stt_col3:
+        stt_no_cloud = st.checkbox(
+            "Never use cloud STT",
+            value=not ALLOW_CLOUD,
+            help="When on, audio is never sent to Google Web Speech.",
+        )
+
+    st.caption(
+        "Local model: faster-whisper on CPU (int8), no network. "
+        + ("Cloud fallback: allowed." if not stt_no_cloud else "Cloud fallback: disabled.")
+    )
+
+    if st.button("📝 Transcribe Audio", type="primary", use_container_width=True):
+        if not stt_audio:
+            st.warning("⚠️ Please upload an audio file.")
+        else:
+            with st.spinner("Transcribing..."):
+                start_ts = time.time()
+                try:
+                    asr = load_asr_model(stt_model_size)
+                    result = transcribe_audio_file(
+                        asr,
+                        stt_audio,
+                        allow_cloud=not stt_no_cloud,
+                        language=STT_LANGUAGE_CODES[stt_language_label],
+                    )
+                    if not result.text:
+                        st.error(f"⚠️ {result.error or 'No speech detected in this audio.'}")
+                    else:
+                        elapsed = time.time() - start_ts
+                        st.success("🎉 Transcription complete.")
+                        st.text_area("Transcript", value=result.text, height=180)
+
+                        meta_bits = [f"Backend: {result.backend}"]
+                        if result.language:
+                            meta_bits.append(f"Language: {result.language}")
+                        if result.language_probability:
+                            meta_bits.append(f"Confidence: {result.language_probability}")
+                        meta_bits.append(f"Time: {elapsed:.2f} s")
+                        st.caption(" • ".join(meta_bits))
+
+                        if not result.backend.startswith(("faster-whisper", "transformers")):
+                            st.warning(
+                                "⚠️ This transcript came from a cloud service, not the local "
+                                "model. Enable the local model or check the audio quality."
+                            )
+
+                        st.download_button(
+                            label="⬇️ Download Transcript (.txt)",
+                            data=result.text.encode("utf-8"),
+                            file_name="voxstudio_transcript.txt",
+                            mime="text/plain",
+                            use_container_width=True,
+                        )
+                except Exception as exc:
+                    st.error(f"Transcription error: {exc}")
+
+
+# ==============================================================================
+# TAB 3: VOICE PROFILES (reference-based)
+# ==============================================================================
+with tabs[2]:
+    st.markdown("""
+    <div style="margin-bottom: 1rem;">
+        <h3 style="margin: 0; color: #fff;">Voice Profiles</h3>
+        <p style="color: #94a3b8; font-size: 0.88rem; margin: 0;">
+            Upload a clean reference recording (10–60 s) to register a reusable voice profile.
+            Profiles are stored per session. When the XTTS v2 cloning engine is enabled, a
+            profile is cloned from your reference; when it is off or unavailable, the profile
+            speaks with a built-in neural voice and is clearly labelled as a fallback.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not sidebar_settings["enable_cloning"]:
+        st.warning(
+            "⚠️ The XTTS v2 cloning engine is off, so voice profiles will speak with a built-in "
+            "neural voice instead of your reference. Turn it on in the sidebar to clone."
+        )
+    elif not CLONING_LOADED:
+        st.error("The cloning engine is enabled but failed to load; profiles will use a fallback voice.")
+    elif not xtts_model_cached():
+        st.info("ℹ️ The first clone will download roughly 1.8 GB of XTTS v2 weights.")
 
     clone_col1, clone_col2 = st.columns([1.2, 1])
 
@@ -403,11 +585,21 @@ with tabs[1]:
             help="For best results, upload a clear recording with minimal background noise.",
         )
 
+        st.markdown("**Consent**")
+        clone_consent = st.checkbox(CONSENT_REQUIRED_HINT, value=False, key="clone_consent")
+        consent_owner = st.text_input(
+            "Whose voice is this?",
+            value="self",
+            help="Leave as 'self' for your own voice, otherwise name the person who gave permission.",
+        )
+
         if st.button("🧬 Save Voice Profile", type="primary", use_container_width=True):
             if not clone_name.strip():
                 st.warning("⚠️ Please provide a name for your voice profile.")
             elif not uploaded_sample:
                 st.warning("⚠️ Please upload a reference audio sample.")
+            elif not clone_consent:
+                st.warning("⚠️ Please confirm you have permission to clone this voice.")
             else:
                 with st.spinner("Saving voice profile..."):
                     try:
@@ -419,9 +611,13 @@ with tabs[1]:
                             gender=clone_gender,
                             accent=clone_accent,
                             user_id=USER_ID,
+                            consent_confirmed=True,
+                            consent_owner=consent_owner,
                         )
                         st.success(f"✅ Voice profile '{clone_name}' added to your library!")
                         st.rerun()
+                    except ConsentRequired as err:
+                        st.error(f"Consent required: {err}")
                     except Exception as err:
                         st.error(f"Error saving voice profile: {err}")
 
@@ -433,16 +629,39 @@ with tabs[1]:
             st.info("ℹ️ No voice profiles yet. Upload a reference sample on the left to create one.")
         else:
             for voice_id, profile in my_profiles.items():
+                consented = profile_has_consent(profile)
+                if consented:
+                    consent = profile.get("consent", {})
+                    badge = (
+                        '<span style="font-size: 0.72rem; color: #10b981; background: rgba(16, 185, 129, 0.15); padding: 0.15rem 0.5rem; border-radius: 4px;">Consent recorded</span>'
+                    )
+                    consent_line = (
+                        f"consent: {consent.get('declared_owner', 'self')} • "
+                        f"{consent.get('confirmed_at', 'n/a')}"
+                    )
+                else:
+                    badge = (
+                        '<span style="font-size: 0.72rem; color: #f59e0b; background: rgba(245, 158, 11, 0.15); padding: 0.15rem 0.5rem; border-radius: 4px;">No consent on file</span>'
+                    )
+                    consent_line = "consent: not recorded"
+
                 st.markdown(f"""
                 <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 10px; padding: 0.9rem; margin-bottom: 0.75rem;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <b style="color: #fff; font-size: 1rem;">🧬 {profile['name']}</b>
-                        <span style="font-size: 0.72rem; color: #10b981; background: rgba(16, 185, 129, 0.15); padding: 0.15rem 0.5rem; border-radius: 4px;">Saved</span>
+                        {badge}
                     </div>
                     <div style="font-size: 0.8rem; color: #94a3b8; margin: 0.3rem 0;">{profile.get('desc')}</div>
                     <div style="font-size: 0.72rem; color: #64748b;">#{profile.get('role')} • {profile.get('accent')} ({profile.get('gender')})</div>
+                    <div style="font-size: 0.7rem; color: #475569; margin-top: 0.25rem;">{consent_line}</div>
                 </div>
                 """, unsafe_allow_html=True)
+
+                if not consented:
+                    st.warning(
+                        f"⚠️ '{profile['name']}' was saved before consent was required. "
+                        "Delete and re-add it to record consent."
+                    )
 
                 if os.path.exists(profile.get("audio_path", "")):
                     st.audio(profile["audio_path"])
@@ -454,92 +673,272 @@ with tabs[1]:
 
 
 # ==============================================================================
-# TAB 3: SPEECH-TO-SPEECH DUBBING
+# TAB 4: VOICE CHANGER (SPEECH-TO-SPEECH)
 # ==============================================================================
-with tabs[2]:
+with tabs[3]:
     st.markdown("""
     <div style="margin-bottom: 1rem;">
-        <h3 style="margin: 0; color: #fff;">Speech-to-Speech Dubbing</h3>
+        <h3 style="margin: 0; color: #fff;">Voice Changer (Speech-to-Speech)</h3>
         <p style="color: #94a3b8; font-size: 0.88rem; margin: 0;">
-            Transcribe an uploaded recording and re-synthesize the words in a different voice.
-            This is a transcribe-then-speak pipeline, so tone and timing are not preserved —
-            only the spoken content is.
+            Keep what you say and how you say it, and change <i>who</i> it sounds like, using a
+            target voice you provide. Choose a waveform <b>voice morph</b> (preserves your words
+            and timing) or <b>dubbing</b> (transcribes, then re-speaks the text).
         </p>
     </div>
     """, unsafe_allow_html=True)
 
+    my_profiles = load_cloned_voices_metadata(USER_ID)
+    profile_choices = {f"🧬 {p['name']}": vid for vid, p in my_profiles.items()}
+
     vc_col1, vc_col2 = st.columns(2)
 
     with vc_col1:
-        st.subheader("1. Input Speech")
-        source_audio = st.file_uploader("Upload Speech Recording (WAV)", type=["wav"], key="vc_source_audio")
-        if source_audio:
+        st.subheader("1. Source speech")
+        source_mode = st.radio(
+            "Provide the speech",
+            ["🎙️ Record now", "📁 Upload a file"],
+            key="vc_source_mode",
+            horizontal=True,
+        )
+        source_audio = None
+        if source_mode.startswith("🎙️"):
+            try:
+                source_audio = st.audio_input("Record the speech to convert", key="vc_record")
+            except Exception:
+                st.info("Recording is unavailable in this browser; upload a file instead.")
+        else:
+            source_audio = st.file_uploader(
+                "Upload speech (WAV, MP3, M4A, FLAC, OGG)",
+                type=["wav", "mp3", "m4a", "flac", "ogg"],
+                key="vc_source_audio",
+            )
+        if source_audio is not None:
             st.audio(source_audio)
 
     with vc_col2:
-        st.subheader("2. Target Voice Persona")
-        target_voice_choice = st.selectbox(
-            "Select Target Voice",
-            list(available_voices.keys()),
-            key="vc_target_voice",
+        st.subheader("2. Target voice")
+        target_mode = st.radio(
+            "Target voice source",
+            ["🧬 Saved voice profile", "📁 Upload a target sample"],
+            key="vc_target_mode",
+            horizontal=True,
         )
-        target_info = available_voices[target_voice_choice]
-        st.caption(f"Role: {target_info['role']} | Accent: {target_info['accent']} ({target_info['gender']})")
-
-    if st.button("🔄 Dub into Target Voice", type="primary", use_container_width=True):
-        if not source_audio:
-            st.warning("⚠️ Please upload a speech recording.")
+        target_profile_label = None
+        target_upload = None
+        if target_mode.startswith("🧬"):
+            if profile_choices:
+                target_profile_label = st.selectbox(
+                    "Select target profile",
+                    list(profile_choices.keys()),
+                    key="vc_target_profile",
+                )
+            else:
+                st.info(
+                    "No saved voice profiles yet. Create one in the **Voice Profiles** tab, or "
+                    "upload a target sample here."
+                )
         else:
-            with st.spinner("Transcribing with Whisper and re-synthesizing..."):
-                start_ts = time.time()
-                try:
-                    asr = load_asr_model()
-                    recognized_text, _temp_wav, err = transcribe_audio_file(asr, source_audio)
+            target_upload = st.file_uploader(
+                "Upload a clean sample of the target voice (10–60 s)",
+                type=["wav", "mp3", "m4a", "flac", "ogg"],
+                key="vc_target_upload",
+            )
+            if target_upload is not None:
+                st.audio(target_upload)
 
-                    if not recognized_text:
-                        st.warning(f"⚠️ {err or 'Could not detect clear words in this recording.'}")
-                        st.stop()
+    st.markdown("---")
+    conv_mode = st.radio(
+        "Conversion mode",
+        [
+            "🎛️ Voice morph — keep my words & timing",
+            "🗣️ Dub — transcribe & re-speak the text",
+        ],
+        key="vc_conv_mode",
+        horizontal=True,
+    )
+    st.caption(
+        "**Voice morph** transforms the actual recording, so words, timing and pauses are kept, by "
+        "matching the target's pitch and spectral envelope — honest DSP, not a trained neural "
+        "identity model, so it changes register and colour rather than perfectly impersonating. "
+        "**Dub** generates a new performance (timing and emotion are lost) but can use a true XTTS "
+        "clone when the cloning engine is enabled."
+    )
 
-                    st.info(f"📝 Transcribed Input: *\"{recognized_text}\"*")
+    if st.button("🎛️ Convert Voice", type="primary", use_container_width=True):
+        if source_audio is None:
+            st.warning("⚠️ Please record or upload the speech to convert.")
+        else:
+            is_morph = conv_mode.startswith("🎛️")
 
-                    source_path = synthesize_neural_speech(
-                        text=recognized_text,
-                        edge_voice=target_info.get("edge_voice", "en-US-ChristopherNeural"),
-                        speed_factor=sidebar_settings["speed_factor"],
-                    )
-                    output_file = postprocess_audio(
-                        source_path,
-                        pitch_semitones=sidebar_settings["pitch_semitones"],
-                        gain_db=sidebar_settings["gain_db"],
-                    )
-                    metrics = generation_metrics(start_ts, time.time(), output_file)
+            # Resolve the target reference audio up front (never inside the try,
+            # so validation warnings are not swallowed by the error handler).
+            target_reference = None
+            target_name = "target voice"
+            target_info = None
+            resolve_error = None
 
-                    st.success("🎉 Dubbed audio generated!")
-                    st.audio(output_file)
-                    render_metrics(metrics)
+            if target_mode.startswith("🧬"):
+                if not target_profile_label:
+                    resolve_error = "No target voice profile is available."
+                else:
+                    profile = my_profiles[profile_choices[target_profile_label]]
+                    target_reference = profile.get("audio_path")
+                    target_name = profile["name"]
+                    target_info = available_voices.get(f"🧬 {target_name} (Voice Profile)")
+                    if not (target_reference and os.path.exists(target_reference)):
+                        resolve_error = "The selected profile has no usable reference audio."
+            else:
+                if target_upload is None:
+                    resolve_error = "Please upload a target voice sample."
+                else:
+                    target_reference = materialize_upload(target_upload)
+                    target_name = getattr(target_upload, "name", "") or "uploaded target sample"
 
-                    st.download_button(
-                        label="⬇️ Download Dubbed Audio",
-                        data=Path(output_file).read_bytes(),
-                        file_name=f"dubbed_{safe_filename(target_info['name'])}.{str(output_file).rsplit('.', 1)[-1]}",
-                        mime=audio_mime(output_file),
-                        use_container_width=True,
-                    )
+            if resolve_error:
+                st.warning(f"⚠️ {resolve_error}")
+            elif (not is_morph) and target_info is None:
+                st.warning(
+                    "Dubbing needs a **saved voice profile** to speak with. Save the uploaded "
+                    "sample in the Voice Profiles tab, or switch to voice morph mode."
+                )
+            elif is_morph:
+                with st.spinner("Morphing the voice toward the target..."):
+                    try:
+                        start_ts = time.time()
+                        source_path = materialize_upload(source_audio)
+                        similarity_before = speaker_similarity(target_reference, source_path)
+                        converted = morph_voice(source_path, target_reference)
+                        similarity_after = speaker_similarity(target_reference, converted.output_path)
+                        metrics = generation_metrics(start_ts, time.time(), converted.output_path)
 
-                except Exception as exc:
-                    st.error(f"Dubbing error: {exc}")
+                        st.session_state.history.append({
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "voice": target_name,
+                            "text": f"[voice morph] source \u2192 {target_name}",
+                            "file_path": converted.output_path,
+                            "engine": "Voice morph (pitch + envelope)",
+                            "metrics": metrics,
+                            "similarity": similarity_after,
+                        })
+
+                        st.success(f"🎉 Voice morphed toward '{target_name}'.")
+                        st.audio(converted.output_path)
+
+                        pitch_cols = st.columns(3)
+                        pitch_cols[0].metric(
+                            "Source pitch",
+                            f"{converted.source_pitch_hz} Hz" if converted.source_pitch_hz else "—",
+                        )
+                        pitch_cols[1].metric(
+                            "Target pitch",
+                            f"{converted.target_pitch_hz} Hz" if converted.target_pitch_hz else "—",
+                        )
+                        pitch_cols[2].metric("Pitch shift", f"{converted.semitones:+.2f} st")
+                        render_metrics(metrics)
+
+                        sim_cols = st.columns(2)
+                        sim_cols[0].metric(
+                            "Spectral similarity — before",
+                            f"{similarity_before:.3f}" if similarity_before is not None else "—",
+                        )
+                        sim_cols[1].metric(
+                            "Spectral similarity — after",
+                            f"{similarity_after:.3f}" if similarity_after is not None else "—",
+                        )
+                        st.caption(
+                            "Spectral similarity is the log-mel envelope correlation against the "
+                            "target reference. 'After' higher than 'before' means it moved toward "
+                            "the target voice."
+                        )
+
+                        st.download_button(
+                            label="⬇️ Download Converted Voice",
+                            data=Path(converted.output_path).read_bytes(),
+                            file_name=f"converted_{safe_filename(target_name)}.wav",
+                            mime="audio/wav",
+                            use_container_width=True,
+                        )
+                    except Exception as exc:
+                        st.error(f"Voice conversion error: {exc}")
+            else:
+                with st.spinner("Transcribing and re-synthesizing..."):
+                    try:
+                        start_ts = time.time()
+                        result = transcribe_audio_file(
+                            load_asr_model(), source_audio, allow_cloud=ALLOW_CLOUD
+                        )
+                        if not result.text:
+                            st.warning(
+                                f"⚠️ {result.error or 'Could not detect clear words in this recording.'}"
+                            )
+                        else:
+                            st.info(f"📝 Transcribed input ({result.backend}): *\"{result.text}\"*")
+
+                            dub_plan = resolve_plan(target_info)
+                            show_engine_notice(dub_plan)
+
+                            if dub_plan.engine == "xtts":
+                                source_path = synthesize_xtts_clone(
+                                    xtts_model=XTTS_MODEL,
+                                    text=result.text,
+                                    speaker_wav_path=dub_plan.reference_path,
+                                )
+                            else:
+                                source_path = synthesize_neural_speech(
+                                    text=result.text,
+                                    edge_voice=dub_plan.edge_voice,
+                                    speed_factor=sidebar_settings["speed_factor"],
+                                )
+
+                            output_file = postprocess_audio(
+                                source_path,
+                                pitch_semitones=sidebar_settings["pitch_semitones"],
+                                gain_db=sidebar_settings["gain_db"],
+                            )
+                            metrics = generation_metrics(start_ts, time.time(), output_file)
+                            similarity = (
+                                speaker_similarity(dub_plan.reference_path, output_file)
+                                if dub_plan.engine == "xtts"
+                                else None
+                            )
+
+                            st.session_state.history.append({
+                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "voice": target_info["name"],
+                                "text": result.text,
+                                "file_path": output_file,
+                                "engine": dub_plan.label,
+                                "metrics": metrics,
+                                "similarity": similarity,
+                            })
+
+                            st.success(f"🎉 Dubbed audio generated — {dub_plan.label}.")
+                            st.audio(output_file)
+                            render_metrics(metrics, similarity)
+
+                            st.download_button(
+                                label="⬇️ Download Dubbed Audio",
+                                data=Path(output_file).read_bytes(),
+                                file_name=f"dubbed_{safe_filename(target_info['name'])}.{str(output_file).rsplit('.', 1)[-1]}",
+                                mime=audio_mime(output_file),
+                                use_container_width=True,
+                            )
+                    except Exception as exc:
+                        st.error(f"Dubbing error: {exc}")
 
 
 # ==============================================================================
-# TAB 4: MULTILINGUAL TRANSLATOR
+# TAB 5: MULTILINGUAL TRANSLATOR
 # ==============================================================================
-with tabs[3]:
+with tabs[4]:
     st.markdown("""
     <div style="margin-bottom: 1rem;">
         <h3 style="margin: 0; color: #fff;">Multilingual Voice Translator</h3>
         <p style="color: #94a3b8; font-size: 0.88rem; margin: 0;">
             Translate English text (typed or transcribed from audio) into Hindi, French, Japanese,
-            Spanish or German, then speak it with a native voice.
+            Spanish or German, then speak it with a native neural voice or with your own cloned
+            reference. Cloning into Japanese additionally requires the optional <code>cutlet</code>
+            package.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -550,8 +949,8 @@ with tabs[3]:
         target_lang = st.selectbox("Select Target Language", list(TRANSLATION_LANGS.keys()))
 
         ml_audio = st.file_uploader(
-            "Upload English voice (WAV) — optional, used for transcription",
-            type=["wav"],
+            "Upload English voice (optional) — used for transcription and cloning",
+            type=["wav", "mp3", "m4a", "flac", "ogg"],
             key="ml_voice_upload",
         )
 
@@ -562,21 +961,19 @@ with tabs[3]:
         )
 
     with ml_col2:
-        st.subheader("Synthesis Engine")
-        engine_mode = st.radio(
-            "Voice Delivery Mode",
-            [
-                "🚀 Neural translation (instant)",
-                "🧬 XTTS v2 zero-shot clone (needs GPU)",
-            ],
+        st.subheader("Voice Source")
+        delivery = st.radio(
+            "How should the translation be spoken?",
+            ["Native neural voice", "Clone from my uploaded reference"],
+            help="Cloning needs the XTTS v2 engine enabled in the sidebar and an uploaded reference.",
         )
 
         lang_voices = TRANSLATION_LANGS[target_lang]["voices"]
         chosen_voice_label = st.selectbox(f"Select {target_lang} Voice Persona", list(lang_voices.keys()))
         chosen_neural_voice = lang_voices[chosen_voice_label]
 
-        st.caption("• **Neural:** speaks the translation with a native-language voice.")
-        st.caption("• **XTTS v2:** clones your own reference audio into the new language (GPU only).")
+        st.caption("• **Native neural voice:** a native-language voice speaks the translation.")
+        st.caption("• **Clone:** XTTS v2 speaks the translation in your uploaded reference's voice.")
 
     if st.button("🌐 Translate & Speak", type="primary", use_container_width=True):
         has_audio = ml_audio is not None
@@ -589,83 +986,112 @@ with tabs[3]:
                 start_ts = time.time()
                 try:
                     speaker_path = None
+                    transcribed_text = None
                     if has_audio:
                         asr = load_asr_model()
-                        transcribed_text, speaker_path, err = transcribe_audio_file(asr, ml_audio)
-                        if has_text:
-                            english_text = ml_text.strip()
-                        elif transcribed_text:
-                            english_text = transcribed_text
-                        else:
-                            st.warning(f"⚠️ {err or 'Could not detect clear words in the audio.'}")
-                            st.info("💡 You can type your sentence directly into the text box above instead.")
-                            st.stop()
-                    else:
+                        ml_result = transcribe_audio_file(asr, ml_audio, allow_cloud=ALLOW_CLOUD)
+                        transcribed_text = ml_result.text
+                        speaker_path = ml_result.audio_path
+
+                    if has_text:
                         english_text = ml_text.strip()
+                    elif transcribed_text:
+                        english_text = transcribed_text
+                    else:
+                        english_text = None
 
-                    lang_info = TRANSLATION_LANGS[target_lang]
-                    translator = load_translator_model(lang_info["model"], lang_info["code"])
-                    translated_text = translate_text(translator, english_text, lang_info["code"])
-
-                    res_c1, res_c2 = st.columns(2)
-                    with res_c1:
-                        st.markdown(f"**Recognized English:**\n\n> {english_text}")
-                    with res_c2:
-                        st.markdown(f"**{target_lang} Translation:**\n\n> {translated_text}")
-
-                    used_xtts = False
-                    if "XTTS" in engine_mode and speaker_path:
-                        xtts = load_xtts_model()
-                        if xtts is not None:
-                            source_path = synthesize_xtts_clone(
-                                xtts_model=xtts,
-                                text=translated_text,
-                                speaker_wav_path=speaker_path,
-                                language=lang_info["code"],
-                            )
-                            used_xtts = True
-                        else:
-                            st.info("💡 XTTS v2 needs a GPU; using the neural voice instead.")
-
-                    if not used_xtts:
-                        source_path = synthesize_neural_speech(
-                            text=translated_text,
-                            edge_voice=chosen_neural_voice,
-                            speed_factor=sidebar_settings["speed_factor"],
+                    if not english_text:
+                        st.warning("⚠️ Could not read the audio and no text was provided.")
+                        st.info("💡 You can type your sentence directly into the text box above instead.")
+                    else:
+                        lang_info = TRANSLATION_LANGS[target_lang]
+                        translator = load_translator_model(lang_info["model"], lang_info["code"])
+                        translated_text = translate_text(
+                            translator, english_text, lang_info["code"], allow_cloud=ALLOW_CLOUD
                         )
 
-                    output_file = postprocess_audio(
-                        source_path,
-                        pitch_semitones=sidebar_settings["pitch_semitones"],
-                        gain_db=sidebar_settings["gain_db"],
-                    )
-                    metrics = generation_metrics(start_ts, time.time(), output_file)
-                    similarity = (
-                        speaker_similarity(speaker_path, output_file)
-                        if used_xtts and speaker_path
-                        else None
-                    )
+                        res_c1, res_c2 = st.columns(2)
+                        with res_c1:
+                            st.markdown(f"**Recognized English:**\n\n> {english_text}")
+                        with res_c2:
+                            st.markdown(f"**{target_lang} Translation:**\n\n> {translated_text}")
+                        st.caption(f"Translation backend: {translated_text.backend}")
 
-                    st.success(f"🎉 Generated {target_lang} speech!")
-                    st.audio(output_file)
-                    render_metrics(metrics, similarity)
+                        wants_clone = delivery == "Clone from my uploaded reference"
+                        if wants_clone and speaker_path:
+                            ml_plan = resolve_plan(
+                                {"is_cloned": True, "audio_path": speaker_path}
+                            )
+                        else:
+                            if wants_clone and not speaker_path:
+                                st.warning(
+                                    "⚠️ Cloning needs an uploaded reference recording; "
+                                    "using a native neural voice instead."
+                                )
+                            ml_plan = resolve_plan(
+                                {"is_cloned": False, "edge_voice": chosen_neural_voice}
+                            )
+                        show_engine_notice(ml_plan)
 
-                    st.download_button(
-                        label=f"⬇️ Download {target_lang} Audio",
-                        data=Path(output_file).read_bytes(),
-                        file_name=f"translated_{target_lang.lower()}.{str(output_file).rsplit('.', 1)[-1]}",
-                        mime=audio_mime(output_file),
-                        use_container_width=True,
-                    )
+                        if ml_plan.engine == "xtts":
+                            reference_wav = prepare_reference_wav(ml_plan.reference_path)
+                            source_path = synthesize_xtts_clone(
+                                xtts_model=XTTS_MODEL,
+                                text=translated_text,
+                                speaker_wav_path=reference_wav,
+                                language=lang_info["code"],
+                            )
+                            similarity_reference = reference_wav
+                        else:
+                            source_path = synthesize_neural_speech(
+                                text=translated_text,
+                                edge_voice=ml_plan.edge_voice,
+                                speed_factor=sidebar_settings["speed_factor"],
+                            )
+                            similarity_reference = None
+
+                        output_file = postprocess_audio(
+                            source_path,
+                            pitch_semitones=sidebar_settings["pitch_semitones"],
+                            gain_db=sidebar_settings["gain_db"],
+                        )
+                        metrics = generation_metrics(start_ts, time.time(), output_file)
+                        similarity = (
+                            speaker_similarity(similarity_reference, output_file)
+                            if similarity_reference
+                            else None
+                        )
+
+                        st.session_state.history.append({
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "voice": f"{target_lang} • {ml_plan.label}",
+                            "text": translated_text,
+                            "file_path": output_file,
+                            "engine": ml_plan.label,
+                            "metrics": metrics,
+                            "similarity": similarity,
+                        })
+
+                        st.success(f"🎉 Generated {target_lang} speech — {ml_plan.label}.")
+                        st.audio(output_file)
+                        render_metrics(metrics, similarity)
+
+                        st.download_button(
+                            label=f"⬇️ Download {target_lang} Audio",
+                            data=Path(output_file).read_bytes(),
+                            file_name=f"translated_{target_lang.lower()}.{str(output_file).rsplit('.', 1)[-1]}",
+                            mime=audio_mime(output_file),
+                            use_container_width=True,
+                        )
 
                 except Exception as exc:
                     st.error(f"Translation & synthesis error: {exc}")
 
 
 # ==============================================================================
-# TAB 5: RULE-BASED VOICE ASSISTANT
+# TAB 6: RULE-BASED VOICE ASSISTANT
 # ==============================================================================
-with tabs[4]:
+with tabs[5]:
     st.markdown("""
     <div style="margin-bottom: 1rem;">
         <h3 style="margin: 0; color: #fff;">Voice Assistant (rule-based)</h3>
@@ -700,11 +1126,11 @@ with tabs[4]:
     if not user_message and voice_note is not None:
         with st.spinner("Transcribing your question..."):
             asr = load_asr_model()
-            transcribed, _path, err = transcribe_audio_file(asr, voice_note)
-            if transcribed:
-                user_message = transcribed
+            agent_result = transcribe_audio_file(asr, voice_note, allow_cloud=ALLOW_CLOUD)
+            if agent_result.text:
+                user_message = agent_result.text
             else:
-                st.warning(f"⚠️ {err or 'Could not transcribe the recording.'}")
+                st.warning(f"⚠️ {agent_result.error or 'Could not transcribe the recording.'}")
 
     if agent_send and user_message:
         with st.spinner("Assistant is speaking..."):
@@ -733,9 +1159,9 @@ with tabs[4]:
 
 
 # ==============================================================================
-# TAB 6: VOICE LIBRARY
+# TAB 7: VOICE LIBRARY
 # ==============================================================================
-with tabs[5]:
+with tabs[6]:
     st.markdown("""
     <div style="margin-bottom: 1.5rem;">
         <h3 style="margin: 0; color: #fff;">Voice Library</h3>
@@ -765,24 +1191,36 @@ with tabs[5]:
                     preview_text = (
                         f"Hello! My name is {v['name']}. This is a sample generated by VoxStudio."
                     )
-                    preview_path = synthesize_neural_speech(
-                        text=preview_text,
-                        edge_voice=v.get("edge_voice", "en-US-ChristopherNeural"),
-                        speed_factor=sidebar_settings["speed_factor"],
-                    )
-                    preview_path = postprocess_audio(
-                        preview_path,
-                        pitch_semitones=sidebar_settings["pitch_semitones"],
-                        gain_db=sidebar_settings["gain_db"],
-                    )
-                    st.audio(preview_path)
+                    preview_plan = resolve_plan(v)
+                    try:
+                        if preview_plan.engine == "xtts":
+                            preview_path = synthesize_xtts_clone(
+                                xtts_model=XTTS_MODEL,
+                                text=preview_text,
+                                speaker_wav_path=preview_plan.reference_path,
+                            )
+                        else:
+                            preview_path = synthesize_neural_speech(
+                                text=preview_text,
+                                edge_voice=preview_plan.edge_voice,
+                                speed_factor=sidebar_settings["speed_factor"],
+                            )
+                        preview_path = postprocess_audio(
+                            preview_path,
+                            pitch_semitones=sidebar_settings["pitch_semitones"],
+                            gain_db=sidebar_settings["gain_db"],
+                        )
+                        st.caption(preview_plan.label)
+                        st.audio(preview_path)
+                    except Exception as exc:
+                        st.error(f"Preview error: {exc}")
         idx += 1
 
 
 # ==============================================================================
-# TAB 7: GENERATION HISTORY
+# TAB 8: GENERATION HISTORY
 # ==============================================================================
-with tabs[6]:
+with tabs[7]:
     st.markdown("""
     <div style="margin-bottom: 1rem;">
         <h3 style="margin: 0; color: #fff;">Generation History</h3>

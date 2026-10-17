@@ -263,8 +263,15 @@ def render_header():
     )
 
 
-def render_sidebar():
-    """Render the sidebar controls and return the audio settings."""
+def render_sidebar(capabilities=None):
+    """Render the sidebar controls and return the audio/engine settings.
+
+    ``capabilities`` is the list returned by ``logic.detect_capabilities()``.
+    When supplied, the panel reports what this machine can actually run instead
+    of advertising features that may be unavailable.
+    """
+    capabilities = capabilities or []
+
     with st.sidebar:
         st.markdown(
             """
@@ -276,7 +283,7 @@ def render_sidebar():
             unsafe_allow_html=True,
         )
 
-        st.caption("The engine is Microsoft edge-tts neural voices. Rate is applied "
+        st.caption("The baseline engine is Microsoft edge-tts neural voices. Rate is applied "
                    "during synthesis; pitch and gain are applied as post-processing.")
 
         speed_factor = st.slider(
@@ -305,25 +312,54 @@ def render_sidebar():
         )
 
         st.markdown("---")
-        st.markdown(
-            """
-        <div style="font-size: 0.78rem; color: #94a3b8; line-height: 1.5;">
-            <b>⚡ Capabilities:</b><br/>
-            • 12 built-in neural voices<br/>
-            • Voice profile library (reference-based)<br/>
-            • Speech-to-speech dubbing<br/>
-            • Translation across 6 languages<br/>
-            • Rule-based voice assistant<br/>
-            • Metrics: latency, RTF, spectral similarity
-        </div>
-        """,
-            unsafe_allow_html=True,
+        st.markdown("**Engine status**")
+
+        cloning = next((c for c in capabilities if c.key == "cloning"), None)
+        cloning_available = bool(cloning and cloning.available)
+        enable_cloning = st.checkbox(
+            "Enable XTTS v2 cloning engine",
+            value=False,
+            disabled=not cloning_available,
+            help=(
+                cloning.detail
+                if cloning
+                else "The cloning engine was not detected on this machine."
+            ),
         )
+        if cloning_available:
+            st.caption("Loads ~4 GB of weights and runs ~4x slower than realtime on CPU. "
+                       "With this off, voice profiles speak with a built-in voice.")
+        else:
+            st.caption("Cloning engine not detected — voice profiles will use a built-in voice.")
+
+        local_only = st.checkbox(
+            "Local only (no cloud fallbacks)",
+            value=False,
+            help="When on, audio is never sent to Google Web Speech and text is never sent to "
+                 "MyMemory. Features that need those services will report that they were skipped.",
+        )
+        if local_only:
+            st.caption("Cloud speech recognition and cloud translation are disabled.")
+
+        st.markdown("---")
+        st.markdown("**Capabilities**")
+        for cap in capabilities:
+            icon = "🟢" if cap.available else "🔴"
+            st.markdown(
+                f"<div style='font-size:0.78rem;color:#94a3b8;margin-bottom:0.4rem;'>"
+                f"{icon} <b style='color:#e2e8f0;'>{cap.label}</b><br/>"
+                f"<span style='color:#64748b;'>{cap.detail}</span></div>",
+                unsafe_allow_html=True,
+            )
+        if not capabilities:
+            st.caption("Capability probe unavailable.")
 
         return {
             "speed_factor": speed_factor,
             "pitch_semitones": pitch_semitones,
             "gain_db": gain_db,
+            "enable_cloning": enable_cloning,
+            "local_only": local_only,
         }
 
 
