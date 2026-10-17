@@ -3,8 +3,18 @@ import os
 import time
 import uuid
 import tempfile
+import sys
+import importlib
 import streamlit as st
 from pathlib import Path
+
+# Hot-reload sibling modules if modified on disk
+for _mod_name in ("ui", "logic"):
+    if _mod_name in sys.modules:
+        try:
+            importlib.reload(sys.modules[_mod_name])
+        except Exception:
+            pass
 
 from ui import (
     inject_custom_styles,
@@ -13,10 +23,10 @@ from ui import (
     render_voice_card,
     render_footer,
 )
+import logic
 from logic import (
     PRESET_VOICES,
     AGENT_PERSONAS,
-    CONSENT_REQUIRED_HINT,
     load_cloned_voices_metadata,
     save_cloned_voice_file,
     delete_cloned_voice,
@@ -38,6 +48,12 @@ from logic import (
     prepare_reference_wav,
     ConsentRequired,
     xtts_model_cached,
+)
+
+CONSENT_REQUIRED_HINT = getattr(
+    logic,
+    "CONSENT_REQUIRED_HINT",
+    "I confirm that this is my own voice, or that I have the speaker's explicit permission to clone it, and that I will not use it to impersonate or mislead anyone."
 )
 
 # -------- Streamlit Page Configuration --------
