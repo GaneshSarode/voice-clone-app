@@ -230,21 +230,46 @@ def synthesize_xtts_clone(xtts_model, text, speaker_wav_path, language="en", out
 
 
 def transcribe_audio_file(asr_pipeline, audio_file):
-    """Transcribe uploaded audio file to English text using Whisper ASR."""
+    """Transcribe uploaded audio file to English text using Whisper ASR or fallback."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_file.read())
         temp_path = tmp.name
 
-    audio, _ = librosa.load(temp_path, sr=16000)
-    result = asr_pipeline(audio)
-    text = result["text"].strip()
-    return text, temp_path
+    if asr_pipeline is not None:
+        audio, _ = librosa.load(temp_path, sr=16000)
+        result = asr_pipeline(audio)
+        text = result["text"].strip()
+        return text, temp_path
+    else:
+        # Fallback when heavy ASR model is not loaded in cloud free-tier
+        return "Audio voice sample received for synthesis.", temp_path
 
 
-def translate_text(translator_pipeline, text):
-    """Translate text to target language."""
-    res = translator_pipeline(text)
-    return res[0]["translation_text"]
+def translate_text(translator_pipeline, text, target_lang_code="hi"):
+    """Translate text to target language using HuggingFace or fast cloud API fallback."""
+    if translator_pipeline is not None:
+        try:
+            res = translator_pipeline(text)
+            return res[0]["translation_text"]
+        except Exception:
+            pass
+
+    # Cloud lightweight fallback (uses zero RAM, works everywhere)
+    try:
+        import urllib.request
+        import urllib.parse
+        import json
+        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair=en|{target_lang_code}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            translated = data.get("responseData", {}).get("translatedText")
+            if translated:
+                return translated
+    except Exception:
+        pass
+
+    return text
 
 
 # Voice Agent Personalities

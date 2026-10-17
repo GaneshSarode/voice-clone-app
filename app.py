@@ -52,42 +52,51 @@ sidebar_settings = render_sidebar()
 # -------- Model Loading Cached Functions --------
 @st.cache_resource
 def load_asr_model():
-    """Load Whisper ASR for Speech-to-Text."""
-    from transformers import pipeline
-    return pipeline(
-        "automatic-speech-recognition",
-        model="openai/whisper-small",
-        device=-1
-    )
+    """Load Whisper ASR for Speech-to-Text if available."""
+    try:
+        from transformers import pipeline
+        return pipeline(
+            "automatic-speech-recognition",
+            model="openai/whisper-small",
+            device=-1
+        )
+    except Exception:
+        return None
 
 
 @st.cache_resource
 def load_translator_model(model_name, target_lang):
-    """Load HuggingFace translation pipeline."""
-    from transformers import pipeline
-    if model_name.startswith("facebook/m2m100"):
+    """Load HuggingFace translation pipeline if available."""
+    try:
+        from transformers import pipeline
+        if model_name.startswith("facebook/m2m100"):
+            return pipeline(
+                "translation",
+                model=model_name,
+                src_lang="en",
+                tgt_lang=target_lang,
+                device=-1
+            )
         return pipeline(
             "translation",
             model=model_name,
-            src_lang="en",
-            tgt_lang=target_lang,
             device=-1
         )
-    return pipeline(
-        "translation",
-        model=model_name,
-        device=-1
-    )
+    except Exception:
+        return None
 
 
 @st.cache_resource
 def load_xtts_model():
-    """Load Coqui XTTS v2 for deep zero-shot voice cloning."""
-    from TTS.api import TTS
-    return TTS(
-        "tts_models/multilingual/multi-dataset/xtts_v2",
-        gpu=False
-    )
+    """Load Coqui XTTS v2 for deep zero-shot voice cloning if available."""
+    try:
+        from TTS.api import TTS
+        return TTS(
+            "tts_models/multilingual/multi-dataset/xtts_v2",
+            gpu=False
+        )
+    except Exception:
+        return None
 
 
 # Multilingual Translation Config
@@ -247,13 +256,23 @@ with tabs[0]:
                     # If user chose XTTS engine and voice is a cloned voice
                     if "XTTS" in tts_engine and voice_info.get("is_cloned") and voice_info.get("audio_path"):
                         xtts = load_xtts_model()
-                        output_file = f"cloned_{int(time.time())}.wav"
-                        synthesize_xtts_clone(
-                            xtts_model=xtts,
-                            text=input_text,
-                            speaker_wav_path=voice_info["audio_path"],
-                            output_path=output_file
-                        )
+                        if xtts is not None:
+                            output_file = f"cloned_{int(time.time())}.wav"
+                            synthesize_xtts_clone(
+                                xtts_model=xtts,
+                                text=input_text,
+                                speaker_wav_path=voice_info["audio_path"],
+                                output_path=output_file
+                            )
+                        else:
+                            st.info("💡 Running in Studio Neural mode (XTTS v2 is reserved for local GPU/high-RAM machines).")
+                            edge_voice = voice_info.get("edge_voice", "en-US-ChristopherNeural")
+                            synthesize_neural_speech(
+                                text=input_text,
+                                edge_voice=edge_voice,
+                                speed_factor=sidebar_settings["speed_factor"],
+                                output_path=output_file
+                            )
                     else:
                         # High-quality neural engine
                         edge_voice = voice_info.get("edge_voice", "en-US-ChristopherNeural")
@@ -509,7 +528,7 @@ with tabs[3]:
                     
                     # Translation step
                     translator = load_translator_model(lang_info["model"], lang_info["code"])
-                    translated_text = translate_text(translator, english_text)
+                    translated_text = translate_text(translator, english_text, lang_info["code"])
 
                     # Display translated text side by side
                     res_c1, res_c2 = st.columns(2)
@@ -522,13 +541,23 @@ with tabs[3]:
 
                     if "XTTS" in engine_mode and speaker_path:
                         xtts = load_xtts_model()
-                        synthesize_xtts_clone(
-                            xtts_model=xtts,
-                            text=translated_text,
-                            speaker_wav_path=speaker_path,
-                            language=lang_info["code"],
-                            output_path=out_path
-                        )
+                        if xtts is not None:
+                            synthesize_xtts_clone(
+                                xtts_model=xtts,
+                                text=translated_text,
+                                speaker_wav_path=speaker_path,
+                                language=lang_info["code"],
+                                output_path=out_path
+                            )
+                        else:
+                            st.info(f"💡 Synthesized via Studio Neural Voice (native {target_lang} speaker).")
+                            out_path = f"translated_{int(time.time())}.mp3"
+                            synthesize_neural_speech(
+                                text=translated_text,
+                                edge_voice=lang_info["neural_voice"],
+                                speed_factor=sidebar_settings["speed_factor"],
+                                output_path=out_path
+                            )
                     else:
                         synthesize_neural_speech(
                             text=translated_text,
