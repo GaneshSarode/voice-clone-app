@@ -52,16 +52,20 @@ sidebar_settings = render_sidebar()
 # -------- Model Loading Cached Functions --------
 @st.cache_resource
 def load_asr_model():
-    """Load Whisper ASR for Speech-to-Text if available."""
+    """Load high-speed, lightweight Whisper model for local CPU transcription."""
     try:
-        from transformers import pipeline
-        return pipeline(
-            "automatic-speech-recognition",
-            model="openai/whisper-small",
-            device=-1
-        )
-    except Exception:
-        return None
+        from faster_whisper import WhisperModel
+        return WhisperModel("tiny", device="cpu", compute_type="int8")
+    except Exception as e:
+        try:
+            from transformers import pipeline
+            return pipeline(
+                "automatic-speech-recognition",
+                model="openai/whisper-tiny",
+                device=-1
+            )
+        except Exception:
+            return None
 
 
 @st.cache_resource

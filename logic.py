@@ -5,6 +5,7 @@ import asyncio
 import tempfile
 import edge_tts
 import librosa
+import soundfile
 from pathlib import Path
 
 CLONED_VOICES_DIR = Path("cloned_voices")
@@ -236,14 +237,20 @@ def transcribe_audio_file(asr_pipeline, audio_file):
         tmp.write(audio_bytes)
         temp_path = tmp.name
 
-    # 1. Try local Whisper pipeline if available
+    # 1. Try local Whisper pipeline (faster-whisper or HuggingFace)
     if asr_pipeline is not None:
         try:
-            audio, _ = librosa.load(temp_path, sr=16000)
-            result = asr_pipeline(audio)
-            text = result.get("text", "").strip()
-            if text:
-                return text, temp_path, None
+            if hasattr(asr_pipeline, "transcribe"):
+                segments, info = asr_pipeline.transcribe(temp_path, beam_size=1)
+                text = " ".join(segment.text for segment in segments).strip()
+                if text:
+                    return text, temp_path, None
+            else:
+                audio, _ = librosa.load(temp_path, sr=16000)
+                result = asr_pipeline(audio)
+                text = result.get("text", "").strip()
+                if text:
+                    return text, temp_path, None
         except Exception as e:
             print(f"Whisper ASR error: {e}")
 
