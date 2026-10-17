@@ -1,38 +1,397 @@
-# ui.py
+# ui.py - ElevenLabs Inspired UI & Styling System
 import streamlit as st
+
+ELEVENLABS_CUSTOM_CSS = """
+<style>
+/* Main Page & Background */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.stApp {
+    background-color: #0b0f17;
+    color: #e2e8f0;
+}
+
+/* Header & Branding */
+.eleven-navbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 1.75rem;
+    background: linear-gradient(180deg, rgba(19, 26, 38, 0.8) 0%, rgba(11, 15, 23, 0.4) 100%);
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(16px);
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.eleven-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+}
+
+.eleven-logo-badge {
+    background: linear-gradient(135deg, #2563eb, #38bdf8);
+    color: white;
+    font-weight: 800;
+    font-size: 1.15rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 8px;
+    letter-spacing: -0.5px;
+    box-shadow: 0 0 15px rgba(37, 99, 235, 0.5);
+}
+
+.eleven-brand-name {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.5px;
+}
+
+.eleven-tagline {
+    font-size: 0.82rem;
+    color: #94a3b8;
+    margin-left: 0.5rem;
+}
+
+.eleven-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.85rem;
+    background: rgba(30, 41, 59, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #38bdf8;
+}
+
+.eleven-status-dot {
+    width: 7px;
+    height: 7px;
+    background-color: #10b981;
+    border-radius: 50%;
+    box-shadow: 0 0 8px #10b981;
+    animation: pulse-dot 2s infinite;
+}
+
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* Card Containers */
+.eleven-card {
+    background: #111827;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 1.5rem;
+    margin-bottom: 1.25rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    transition: all 0.2s ease;
+}
+
+.eleven-card:hover {
+    border-color: rgba(56, 189, 248, 0.25);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.voice-card {
+    background: rgba(17, 24, 39, 0.8);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 0.75rem;
+    transition: all 0.2s ease;
+}
+
+.voice-card:hover {
+    border-color: #38bdf8;
+    background: rgba(30, 41, 59, 0.6);
+    transform: translateY(-2px);
+}
+
+.voice-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.4rem;
+}
+
+.voice-name {
+    font-weight: 600;
+    font-size: 0.98rem;
+    color: #ffffff;
+}
+
+.voice-badge {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 6px;
+    background: rgba(37, 99, 235, 0.2);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    font-weight: 500;
+}
+
+.voice-desc {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin-bottom: 0.4rem;
+}
+
+/* Tabs styling */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px;
+    background-color: #111827;
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px;
+    padding: 8px 18px;
+    font-weight: 500;
+    font-size: 0.88rem;
+    color: #94a3b8;
+    background-color: transparent;
+    border: none;
+    transition: all 0.15s ease;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #1e293b !important;
+    color: #38bdf8 !important;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Buttons */
+.stButton > button {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: #ffffff;
+    font-weight: 600;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 0.6rem 1.4rem;
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+    transition: all 0.2s ease;
+}
+
+.stButton > button:hover {
+    background: linear-gradient(135deg, #3b82f6, #2563eb);
+    box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5);
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Sliders */
+.stSlider [data-baseweb="slider"] {
+    padding-top: 10px;
+    padding-bottom: 10px;
+}
+
+/* Text Area */
+.stTextArea textarea {
+    background-color: #111827 !important;
+    color: #f1f5f9 !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: 12px !important;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    padding: 1rem;
+}
+
+.stTextArea textarea:focus {
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2) !important;
+}
+
+/* File Uploader */
+.stFileUploader {
+    background-color: rgba(17, 24, 39, 0.5);
+    border-radius: 12px;
+    padding: 0.5rem;
+}
+
+/* Waveform Box */
+.waveform-preview {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    height: 36px;
+    padding: 0 8px;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 8px;
+    margin: 8px 0;
+}
+
+.wave-bar {
+    width: 3px;
+    background: #38bdf8;
+    border-radius: 2px;
+    opacity: 0.8;
+}
+
+/* Character Counter */
+.char-counter {
+    display: flex;
+    justify-content: flex-end;
+    font-size: 0.78rem;
+    color: #64748b;
+    margin-top: -8px;
+    margin-bottom: 12px;
+}
+
+/* Footer */
+.eleven-footer {
+    text-align: center;
+    padding: 2.5rem 1rem 1.5rem 1rem;
+    color: #64748b;
+    font-size: 0.82rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    margin-top: 3rem;
+}
+</style>
+"""
+
+def inject_custom_styles():
+    """Injects custom ElevenLabs CSS into the Streamlit app."""
+    st.markdown(ELEVENLABS_CUSTOM_CSS, unsafe_allow_html=True)
 
 
 def render_header():
-    st.markdown(
-        """
-    <h1 style="text-align:center;">
-        🎙️ Multi-Language Voice Cloning
-    </h1>
-    <p style="text-align:center; color:gray;">
-        Clone your voice and speak new languages — CPU-only
-    </p>
-    """,
-        unsafe_allow_html=True,
-    )
+    """Renders the top branding navigation bar in ElevenLabs style."""
+    st.markdown("""
+    <div class="eleven-navbar">
+        <div class="eleven-brand">
+            <span class="eleven-logo-badge">11</span>
+            <div>
+                <span class="eleven-brand-name">ElevenVoice Studio</span>
+                <span class="eleven-tagline">AI Voice Generator & Voice Agents Platform</span>
+            </div>
+        </div>
+        <div style="display: flex; gap: 0.6rem; align-items: center;">
+            <div class="eleven-status-pill">
+                <span class="eleven-status-dot"></span>
+                <span>Turbo v2.5 Online</span>
+            </div>
+            <div class="eleven-status-pill" style="color: #a78bfa; border-color: rgba(167, 139, 250, 0.3);">
+                <span>Hybrid XTTS + Neural</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def render_sidebar():
+    """Renders the ElevenLabs sidebar with model options and statistics."""
     with st.sidebar:
-        st.markdown("## 📊 Project Dashboard")
-        st.markdown(
-            """
-        **Engine:** XTTS v2
-        **ASR:** Whisper
-        **Translation:** HuggingFace
-        **Hardware:** CPU only
-        """
+        st.markdown("""
+        <div style="display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem;">
+            <span style="background: #2563eb; color: white; padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: bold; font-size: 0.85rem;">11</span>
+            <span style="font-weight: 700; font-size: 1.1rem; color: #fff;">Voice Settings</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.caption("AI Model Selection")
+        model_choice = st.selectbox(
+            "Generation Model",
+            [
+                "Eleven Multilingual v2 (Ultra-realistic, 29+ Langs)",
+                "Eleven English v1 (High-speed Studio)",
+                "Coqui XTTS v2 (Zero-shot Deep Voice Clone)"
+            ],
+            index=0,
+            help="Choose between lightning-fast natural Neural voices or local zero-shot deep cloning."
         )
+
         st.markdown("---")
-        st.markdown("🧠 *Educational / Research use*")
+        st.caption("Default Voice Parameters")
+
+        stability = st.slider(
+            "Stability",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.75,
+            step=0.05,
+            help="Higher values make speech more steady and consistent. Lower values add dramatic emotion and variation."
+        )
+
+        similarity_boost = st.slider(
+            "Clarity + Similarity Boost",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.85,
+            step=0.05,
+            help="Enhances overall voice clarity and likeness to the original reference audio."
+        )
+
+        speed_factor = st.slider(
+            "Speed Multiplier",
+            min_value=0.5,
+            max_value=2.0,
+            value=1.0,
+            step=0.05,
+            help="Controls speech rate without altering audio pitch."
+        )
+
+        st.markdown("---")
+        st.markdown("""
+        <div style="font-size: 0.78rem; color: #94a3b8; line-height: 1.5;">
+            <b>⚡ Capabilities:</b><br/>
+            • 29+ World Languages<br/>
+            • Instant Voice Cloning (IVC)<br/>
+            • Speech-to-Speech Voice Changer<br/>
+            • Cross-Lingual Translation<br/>
+            • Interactive Voice Agent<br/>
+        </div>
+        """, unsafe_allow_html=True)
+
+        return {
+            "model_choice": model_choice,
+            "stability": stability,
+            "similarity_boost": similarity_boost,
+            "speed_factor": speed_factor
+        }
 
 
-def render_status():
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Mode", "CPU")
-    col2.metric("Voice Clone", "XTTS v2")
-    col3.metric("Latency", "Slow ⏳")
+def render_voice_card(voice_name, role_tag, accent, gender, desc, is_cloned=False):
+    """Renders a voice card in the voice library showcase."""
+    badge_color = "#10b981" if is_cloned else "#38bdf8"
+    bg_color = "rgba(16, 185, 129, 0.15)" if is_cloned else "rgba(56, 189, 248, 0.15)"
+    label = "🧬 Cloned Voice" if is_cloned else f"{gender} • {accent}"
+
+    return f"""
+    <div class="voice-card">
+        <div class="voice-card-header">
+            <span class="voice-name">🎙️ {voice_name}</span>
+            <span class="voice-badge" style="color: {badge_color}; background: {bg_color}; border-color: {badge_color}44;">
+                {label}
+            </span>
+        </div>
+        <div class="voice-desc">{desc}</div>
+        <div style="display: flex; gap: 0.4rem; font-size: 0.72rem; color: #64748b;">
+            <span>#{role_tag}</span>
+            <span>•</span>
+            <span>{accent}</span>
+        </div>
+    </div>
+    """
+
+
+def render_footer():
+    """Renders the page footer."""
+    st.markdown("""
+    <div class="eleven-footer">
+        <b>ElevenVoice Studio</b> — Inspired by ElevenLabs AI Voice Generator & Conversational Platform.<br/>
+        Zero-shot voice cloning powered by XTTS v2, Whisper ASR & Neural Edge Audio Engines.
+    </div>
+    """, unsafe_allow_html=True)

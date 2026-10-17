@@ -1,4 +1,4 @@
-streamlit==1.32.0
+streamlit==1.40.1
 torch==2.1.2
 torchaudio==2.1.2
 TTS==0.22.0
@@ -7,3 +7,4 @@ sentencepiece
 librosa
 soundfile
 numpy
+edge-tts>=7.0.0
