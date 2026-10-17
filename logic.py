@@ -230,19 +230,47 @@ def synthesize_xtts_clone(xtts_model, text, speaker_wav_path, language="en", out
 
 
 def transcribe_audio_file(asr_pipeline, audio_file):
-    """Transcribe uploaded audio file to English text using Whisper ASR or fallback."""
+    """Transcribe uploaded audio file to English text using Whisper ASR or Google Web Speech."""
+    audio_bytes = audio_file.read()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_file.read())
+        tmp.write(audio_bytes)
         temp_path = tmp.name
 
+    # 1. Try local Whisper pipeline if available
     if asr_pipeline is not None:
-        audio, _ = librosa.load(temp_path, sr=16000)
-        result = asr_pipeline(audio)
-        text = result["text"].strip()
-        return text, temp_path
-    else:
-        # Fallback when heavy ASR model is not loaded in cloud free-tier
-        return "Audio voice sample received for synthesis.", temp_path
+        try:
+            audio, _ = librosa.load(temp_path, sr=16000)
+            result = asr_pipeline(audio)
+            text = result.get("text", "").strip()
+            if text:
+                return text, temp_path
+        except Exception:
+            pass
+
+    # 2. Cloud-native SpeechRecognition (Google Web Speech API - free & fast)
+    try:
+        import speech_recognition as sr
+        data, sr_rate = librosa.load(temp_path, sr=16000, mono=True)
+        converted_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+        soundfile.write(converted_wav, data, 16000)
+
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(converted_wav) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
+
+        try:
+            os.remove(converted_wav)
+        except Exception:
+            pass
+
+        if text and text.strip():
+            return text.strip(), temp_path
+    except Exception as e:
+        print(f"Speech recognition error: {e}")
+
+    # 3. Fallback message only if recognition could not detect clear words
+    return "Could not transcribe audio clearly. Please ensure your recording is clear and audible.", temp_path
 
 
 def translate_text(translator_pipeline, text, target_lang_code="hi"):

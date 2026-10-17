@@ -104,31 +104,51 @@ TRANSLATION_LANGS = {
     "Hindi": {
         "model": "Helsinki-NLP/opus-mt-en-hi",
         "code": "hi",
-        "neural_voice": "hi-IN-MadhurNeural",
+        "voices": {
+            "Madhur (Deep Male)": "hi-IN-MadhurNeural",
+            "Swara / Kavya (Expressive Female)": "hi-IN-SwaraNeural"
+        },
+        "default_voice": "hi-IN-MadhurNeural",
         "file_suffix": "hindi_speech.mp3"
     },
     "French": {
         "model": "Helsinki-NLP/opus-mt-en-fr",
         "code": "fr",
-        "neural_voice": "fr-FR-DeniseNeural",
+        "voices": {
+            "Henri (Sophisticated Male)": "fr-FR-HenriNeural",
+            "Denise (Chic Female)": "fr-FR-DeniseNeural"
+        },
+        "default_voice": "fr-FR-HenriNeural",
         "file_suffix": "french_speech.mp3"
     },
     "Japanese": {
         "model": "facebook/m2m100_418M",
         "code": "ja",
-        "neural_voice": "ja-JP-NanamiNeural",
+        "voices": {
+            "Keita (Natural Male)": "ja-JP-KeitaNeural",
+            "Nanami (Gentle Female)": "ja-JP-NanamiNeural"
+        },
+        "default_voice": "ja-JP-KeitaNeural",
         "file_suffix": "japanese_speech.mp3"
     },
     "Spanish": {
         "model": "Helsinki-NLP/opus-mt-en-es",
         "code": "es",
-        "neural_voice": "es-ES-AlvaroNeural",
+        "voices": {
+            "Alvaro (Confident Male)": "es-ES-AlvaroNeural",
+            "Elvira (Warm Female)": "es-ES-ElviraNeural"
+        },
+        "default_voice": "es-ES-AlvaroNeural",
         "file_suffix": "spanish_speech.mp3"
     },
     "German": {
         "model": "Helsinki-NLP/opus-mt-en-de",
         "code": "de",
-        "neural_voice": "de-DE-KillianNeural",
+        "voices": {
+            "Killian (Professional Male)": "de-DE-KillianNeural",
+            "Katja (Clear Female)": "de-DE-KatjaNeural"
+        },
+        "default_voice": "de-DE-KillianNeural",
         "file_suffix": "german_speech.mp3"
     }
 }
@@ -505,7 +525,16 @@ with tabs[3]:
                 "🧬 XTTS v2 Zero-Shot Voice Clone (Your exact voice timbre - CPU slow)"
             ]
         )
-        st.caption("• **Studio Neural:** Generates native accent and fluent pronunciation in 2 seconds.")
+        
+        # Speaker Persona Selection (Male / Female)
+        lang_voices = TRANSLATION_LANGS[target_lang]["voices"]
+        chosen_voice_label = st.selectbox(
+            f"Select {target_lang} Voice Persona",
+            list(lang_voices.keys())
+        )
+        chosen_neural_voice = lang_voices[chosen_voice_label]
+
+        st.caption("• **Studio Neural:** Translates and speaks with natural fluent native accent.")
         st.caption("• **XTTS v2:** Deep learning model that clones your acoustic fingerprint into the new language.")
 
     if st.button("🌐 Translate & Clone Speech", type="primary", use_container_width=True):
@@ -522,6 +551,10 @@ with tabs[3]:
                         asr = load_asr_model()
                         english_text, speaker_path = transcribe_audio_file(asr, ml_audio)
                     else:
+                        english_text = ml_text.strip()
+
+                    # If user provided both audio AND typed custom text, prioritize typed text for translation
+                    if has_audio and has_text:
                         english_text = ml_text.strip()
 
                     lang_info = TRANSLATION_LANGS[target_lang]
@@ -550,18 +583,18 @@ with tabs[3]:
                                 output_path=out_path
                             )
                         else:
-                            st.info(f"💡 Synthesized via Studio Neural Voice (native {target_lang} speaker).")
+                            st.info(f"💡 Synthesized via Studio Neural Voice ({chosen_voice_label}).")
                             out_path = f"translated_{int(time.time())}.mp3"
                             synthesize_neural_speech(
                                 text=translated_text,
-                                edge_voice=lang_info["neural_voice"],
+                                edge_voice=chosen_neural_voice,
                                 speed_factor=sidebar_settings["speed_factor"],
                                 output_path=out_path
                             )
                     else:
                         synthesize_neural_speech(
                             text=translated_text,
-                            edge_voice=lang_info["neural_voice"],
+                            edge_voice=chosen_neural_voice,
                             speed_factor=sidebar_settings["speed_factor"],
                             output_path=out_path
                         )
